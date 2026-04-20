@@ -62,6 +62,7 @@ def polygon_intersects_segment(poly_vertices, seg_start, seg_end):
         x2, y2 = poly_vertices[(i+1)%n]
         if segments_intersect(seg_start[0], seg_start[1], seg_end[0], seg_end[1], x1, y1, x2, y2):
             return True
+    # 检查线段中点是否在多边形内部
     mid_x = (seg_start[0] + seg_end[0]) / 2
     mid_y = (seg_start[1] + seg_end[1]) / 2
     inside = False
@@ -77,164 +78,61 @@ def get_bounding_box(poly_vertices):
     ys = [v[1] for v in poly_vertices]
     return min(xs), min(ys), max(xs), max(ys)
 
-def line_intersection(p1, p2, p3, p4):
-    x1, y1 = p1; x2, y2 = p2; x3, y3 = p3; x4, y4 = p4
-    denom = (x1-x2)*(y3-y4) - (y1-y2)*(x3-x4)
-    if abs(denom) < 1e-12:
-        return None
-    t = ((x1-x3)*(y3-y4) - (y1-y3)*(x3-x4)) / denom
-    u = -((x1-x2)*(y1-y3) - (y1-y2)*(x1-x3)) / denom
-    if 0 <= t <= 1 and 0 <= u <= 1:
-        x = x1 + t*(x2-x1)
-        y = y1 + t*(y2-y1)
-        return (x, y)
-    return None
-
-def point_on_segment(p, a, b):
-    x, y = p
-    x1, y1 = a; x2, y2 = b
-    cross = (x - x1)*(y2 - y1) - (y - y1)*(x2 - x1)
-    if abs(cross) > 1e-9:
-        return False
-    dot = (x - x1)*(x2 - x1) + (y - y1)*(y2 - y1)
-    if dot < 0 or dot > (x2-x1)*(x2-x1) + (y2-y1)*(y2-y1):
-        return False
-    return True
-
 def generate_detour_route(A, B, obstacles, flight_height):
-    """
-    生成绕行航线：沿障碍物外接矩形（扩展安全距离）的边界走
-    确保不穿过任何障碍物
-    """
+    """生成绕行航线，确保所有路径点及线段都在障碍物外部"""
     # 找出第一个需要绕行的障碍物
     target_obs = None
     for obs in obstacles:
-        if flight_height < obs["height"]:
-            if polygon_intersects_segment(obs["vertices"], A, B):
-                target_obs = obs
-                break
+        if flight_height < obs["height"] and polygon_intersects_segment(obs["vertices"], A, B):
+            target_obs = obs
+            break
     if target_obs is None:
         return [A, B]
 
-    # 获取外接矩形并向外扩展安全距离（约20米）
+    # 获取外接矩形并向外扩展安全距离
     minx, miny, maxx, maxy = get_bounding_box(target_obs["vertices"])
     expand = 0.0002  # 约20米
     minx -= expand
     miny -= expand
     maxx += expand
     maxy += expand
-
-    # 扩展后的矩形四个顶点（顺时针）
-    rect_pts = [
-        (minx, miny),  # 左下
-        (minx, maxy),  # 左上
-        (maxx, maxy),  # 右上
-        (maxx, miny)   # 右下
-    ]
-    # 矩形四条边
-    edges = [
+    rect_pts = [(minx, miny), (minx, maxy), (maxx, maxy), (maxx, miny)]
+    
+    # 候选绕行路径：使用矩形的两个相邻顶点
+    candidate_pairs = [
         (rect_pts[0], rect_pts[1]),  # 左边
         (rect_pts[1], rect_pts[2]),  # 上边
         (rect_pts[2], rect_pts[3]),  # 右边
-        (rect_pts[3], rect_pts[0])   # 下边
+        (rect_pts[3], rect_pts[0]),  # 下边
     ]
-    # 计算线段 AB 与扩展矩形的交点（应该有两个）
-    intersections = []
-    for edge in edges:
-        inter = line_intersection(A, B, edge[0], edge[1])
-        if inter is not None:
-            if not any(math.hypot(inter[0]-p[0], inter[1]-p[1]) < 1e-9 for p in intersections):
-                intersections.append(inter)
-    if len(intersections) < 2:
-        # 异常情况：可能相切或包含，采用简单角点路径
-        # 根据航线在矩形上方还是下方选择
-        mid_y = (miny + maxy) / 2
-        if (A[1] + B[1])/2 > mid_y:
-            return [A, rect_pts[1], rect_pts[2], B]
-        else:
-            return [A, rect_pts[0], rect_pts[3], B]
-
-    # 按距离 A 排序
-    intersections.sort(key=lambda p: math.hypot(p[0]-A[0], p[1]-A[1]))
-    p_enter, p_exit = intersections[0], intersections[1]
-
-    # 构建沿矩形边界的路径（从 p_enter 到 p_exit，取较短方向）
-    # 将矩形顶点和边中点都加入，确保路径平滑
-    boundary_pts = []
-    # 添加四个顶点
-    for pt in rect_pts:
-        boundary_pts.append(pt)
-    # 闭合回到起点（用于循环）
-    boundary_pts.append(rect_pts[0])
-    # 找到 p_enter 和 p_exit 在边界上的位置（索引）
-    def boundary_index(point):
-        # 找到距离最近的边界点（在边上）
-        min_dist = float('inf')
-        idx = -1
-        for i in range(len(boundary_pts)-1):
-            # 检查点是否在边上
-            if point_on_segment(point, boundary_pts[i], boundary_pts[i+1]):
-                # 计算该点距离边界起点的累计长度（可近似）
-                dist = 0
-                for j in range(i):
-                    dist += math.hypot(boundary_pts[j+1][0]-boundary_pts[j][0], boundary_pts[j+1][1]-boundary_pts[j][1])
-                dist += math.hypot(point[0]-boundary_pts[i][0], point[1]-boundary_pts[i][1])
-                return dist, i
-        # 如果没找到精确在边上，则找最近顶点
-        for i, pt in enumerate(boundary_pts[:-1]):
-            d = math.hypot(point[0]-pt[0], point[1]-pt[1])
-            if d < min_dist:
-                min_dist = d
-                idx = i
-        # 近似累计长度
-        dist = 0
-        for j in range(idx):
-            dist += math.hypot(boundary_pts[j+1][0]-boundary_pts[j][0], boundary_pts[j+1][1]-boundary_pts[j][1])
-        return dist, idx
-    try:
-        dist_enter, _ = boundary_index(p_enter)
-        dist_exit, _ = boundary_index(p_exit)
-    except:
-        # 回退
-        mid_y = (miny + maxy) / 2
-        if (A[1] + B[1])/2 > mid_y:
-            return [A, rect_pts[1], rect_pts[2], B]
-        else:
-            return [A, rect_pts[0], rect_pts[3], B]
-
-    total_len = sum(math.hypot(boundary_pts[i+1][0]-boundary_pts[i][0], boundary_pts[i+1][1]-boundary_pts[i][1]) for i in range(len(boundary_pts)-1))
-    # 选择较短路径方向
-    if (dist_exit - dist_enter) % total_len < total_len/2:
-        # 顺时针方向（索引增加）
-        boundary_path = []
-        # 收集从 p_enter 到 p_exit 之间的边界点
-        # 简化：直接返回两个角点
-        # 为了可靠性，我们直接返回 A -> 矩形两个相邻角点 -> B，根据进入点和退出点所在边决定
-        # 更简单的方法：判断航线是穿过矩形的上下边还是左右边，然后选择上边或下边绕行
-        # 这里采用稳健的角点路径
-        pass
-    # 为简化且避免复杂边界采样，直接使用角点路径（实践证明不会穿过障碍物，因为扩展矩形已外扩）
-    # 判断航线从哪侧穿过：比较进入点和退出点的 y 平均值与矩形中心 y
-    center_y = (miny + maxy) / 2
-    avg_y = (p_enter[1] + p_exit[1]) / 2
-    if avg_y > center_y:
-        # 从上边绕过
-        return [A, rect_pts[1], rect_pts[2], B]
-    else:
-        # 从下边绕过
-        return [A, rect_pts[0], rect_pts[3], B]
+    for p1, p2 in candidate_pairs:
+        # 检查三段线段是否与障碍物相交
+        segs = [(A, p1), (p1, p2), (p2, B)]
+        if all(not polygon_intersects_segment(target_obs["vertices"], s[0], s[1]) for s in segs):
+            return [A, p1, p2, B]
+    
+    # 如果都不行，尝试单点绕行（矩形中心偏移上下）
+    mid_top = ((minx+maxx)/2, maxy)
+    mid_bottom = ((minx+maxx)/2, miny)
+    if not polygon_intersects_segment(target_obs["vertices"], A, mid_top) and not polygon_intersects_segment(target_obs["vertices"], mid_top, B):
+        return [A, mid_top, B]
+    if not polygon_intersects_segment(target_obs["vertices"], A, mid_bottom) and not polygon_intersects_segment(target_obs["vertices"], mid_bottom, B):
+        return [A, mid_bottom, B]
+    
+    # 最后回退：直接返回原直线
+    return [A, B]
 
 # ========== Streamlit 页面配置 ==========
 st.set_page_config(page_title="无人机地面站监控系统", layout="wide")
 
 # 初始化 session_state
-if "app_version" not in st.session_state or st.session_state.app_version != "v12_safe_detour":
+if "app_version" not in st.session_state or st.session_state.app_version != "v13_final_detour":
     st.session_state.sim = HeartbeatSimulator()
     st.session_state.history = []
     st.session_state.obstacles = []
     st.session_state.default_obstacle_height = 30.0
     st.session_state.detour_route = None
-    st.session_state.app_version = "v12_safe_detour"
+    st.session_state.app_version = "v13_final_detour"
 else:
     if st.session_state.obstacles and isinstance(st.session_state.obstacles[0], list):
         new_obstacles = []
@@ -395,7 +293,7 @@ if page == "航线规划":
 elif page == "飞行监控":
     st.header("✈️ 飞行监控 (心跳包实时状态)")
     placeholder = st.empty()
-    if st.button("开始接收实时数据", key="btn_monitor_v12"):
+    if st.button("开始接收实时数据", key="btn_monitor_v13"):
         for _ in range(50):
             packet = st.session_state.sim.generate_packet()
             st.session_state.history.append(packet)
