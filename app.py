@@ -6,10 +6,11 @@ from folium.plugins import Draw
 from streamlit_folium import st_folium
 from heartbeat_sim import HeartbeatSimulator
 import math
+import numpy as np
+from shapely.geometry import Polygon, LineString, Point
 
-# ========== GCJ-02 转 WGS-84 精确函数 ==========
+# ========== GCJ-02 转 WGS-84 ==========
 def gcj02_to_wgs84(lng, lat):
-    """GCJ-02 -> WGS-84"""
     a = 6378245.0
     ee = 0.00669342162296594323
     PI = math.pi
@@ -40,19 +41,64 @@ def gcj02_to_wgs84(lng, lat):
     wgs_lng = lng - dlng
     return wgs_lng, wgs_lat
 
+# ========== 绕行辅助函数 ==========
+def generate_detour_route(A, B, obstacle_polygons, flight_height):
+    """
+    生成绕行航线
+    A, B: (lng, lat) 起点终点
+    obstacle_polygons: list of {"vertices": [(lng,lat)], "height": float}
+    flight_height: 飞行高度
+    返回: 绕行航点列表 [(lng, lat), ...] 若无需绕行则返回 [A, B]
+    """
+    line = LineString([A, B])
+    need_detour = False
+    for obs in obstacle_polygons:
+        if flight_height < obs["height"]:
+            poly = Polygon(obs["vertices"])
+            if line.intersects(poly):
+                need_detour = True
+                break
+    if not need_detour:
+        return [A, B]
+
+    # 简易绕行策略：找到与线段相交的第一个障碍物，在其两侧生成绕行点
+    # 这里简化为：取障碍物的外接矩形，计算矩形与AB的交点，然后添加偏移点
+    # 实际应用中可改用更复杂的算法，此处提供示例效果
+    detour_points = [A]
+    for obs in obstacle_polygons:
+        if flight_height >= obs["height"]:
+            continue
+        poly = Polygon(obs["vertices"])
+        if line.intersects(poly):
+            # 计算多边形中心
+            center = poly.centroid
+            # 垂直于AB方向的偏移向量
+            dx = B[0] - A[0]
+            dy = B[1] - A[1]
+            length = math.hypot(dx, dy)
+            if length == 0:
+                return [A, B]
+            perp = (-dy / length, dx / length)
+            offset_dist = 0.0005  # 约50米，可调整
+            p1 = (center.x + perp[0] * offset_dist, center.y + perp[1] * offset_dist)
+            p2 = (center.x - perp[0] * offset_dist, center.y - perp[1] * offset_dist)
+            # 按距离起点排序插入
+            detour_points.extend([p1, p2])
+            break  # 只绕第一个冲突障碍物
+    detour_points.append(B)
+    return detour_points
+
 # 页面配置
 st.set_page_config(page_title="无人机地面站监控系统", layout="wide")
 
 # 初始化 session_state
-if "app_version" not in st.session_state or st.session_state.app_version != "v8_obstacle_height":
+if "app_version" not in st.session_state or st.session_state.app_version != "v9_detour":
     st.session_state.sim = HeartbeatSimulator()
     st.session_state.history = []
-    # 障碍物存储格式: [{"vertices": [(lng,lat),...], "height": float}, ...]
     st.session_state.obstacles = []
-    st.session_state.default_obstacle_height = 30.0   # 默认高度30米
-    st.session_state.app_version = "v8_obstacle_height"
+    st.session_state.default_obstacle_height = 30.0
+    st.session_state.app_version = "v9_detour"
 else:
-    # 兼容旧版数据：如果旧障碍物是纯列表，转换为带高度的字典
     if st.session_state.obstacles and isinstance(st.session_state.obstacles[0], list):
         new_obstacles = []
         for poly in st.session_state.obstacles:
@@ -70,32 +116,24 @@ st.sidebar.info("✅ 卫星图底图：Esri World Imagery (WGS-84)\n若选择 GC
 if page == "航线规划":
     st.header("🗺️ 航线规划 + 障碍物圈选 (WGS-84 卫星图)")
 
-    # 侧边栏：默认障碍物高度设置
+    # 侧边栏障碍物管理
     st.sidebar.subheader("🚧 障碍物默认高度")
     default_height = st.sidebar.number_input(
         "新绘制障碍物的默认高度 (米)", 
-        min_value=0.0, 
-        max_value=200.0, 
-        value=st.session_state.default_obstacle_height,
-        step=5.0
+        min_value=0.0, max_value=200.0, 
+        value=st.session_state.default_obstacle_height, step=5.0
     )
     st.session_state.default_obstacle_height = default_height
-
     st.sidebar.divider()
     st.sidebar.subheader("📋 已添加的障碍物")
-    # 显示并管理已有障碍物
     if not st.session_state.obstacles:
         st.sidebar.write("暂无障碍物")
     else:
         for idx, obs in enumerate(st.session_state.obstacles):
             with st.sidebar.expander(f"障碍物 {idx+1} (高度: {obs['height']} m)"):
                 new_height = st.number_input(
-                    f"高度 (m)", 
-                    min_value=0.0, 
-                    max_value=200.0, 
-                    value=obs['height'],
-                    key=f"height_{idx}",
-                    step=5.0
+                    f"高度 (m)", min_value=0.0, max_value=200.0, value=obs['height'],
+                    key=f"height_{idx}", step=5.0
                 )
                 if new_height != obs['height']:
                     obs['height'] = new_height
@@ -104,6 +142,7 @@ if page == "航线规划":
                     st.session_state.obstacles.pop(idx)
                     st.rerun()
                 st.caption(f"顶点数: {len(obs['vertices'])}")
+    st.sidebar.metric("障碍物总数", len(st.session_state.obstacles))
 
     col1, col2 = st.columns([1, 2])
     with col1:
@@ -112,141 +151,123 @@ if page == "航线规划":
         lon_a = st.number_input("起点 A 经度", value=118.7490, format="%.6f")
         lat_b = st.number_input("终点 B 纬度", value=32.2343, format="%.6f")
         lon_b = st.number_input("终点 B 经度", value=118.7495, format="%.6f")
-        height = st.slider("设定飞行高度 (m)", 0, 100, 50)
+        flight_height = st.slider("设定飞行高度 (m)", 0, 100, 50)
 
         # 坐标转换
         if coord_mode == "GCJ-02":
             display_lon_a, display_lat_a = gcj02_to_wgs84(lon_a, lat_a)
             display_lon_b, display_lat_b = gcj02_to_wgs84(lon_b, lat_b)
-            st.success("已自动将 GCJ-02 坐标转换为 WGS-84，匹配卫星图")
+            st.success("已自动将 GCJ-02 坐标转换为 WGS-84")
         else:
             display_lon_a, display_lat_a = lon_a, lat_a
             display_lon_b, display_lat_b = lon_b, lat_b
             st.info("直接使用 WGS-84 坐标")
 
-        # 辅助按钮
+        # 绕行检测按钮
+        if st.button("✈️ 检测冲突并生成绕行航线"):
+            with st.spinner("正在计算绕行路径..."):
+                A_wgs = (display_lon_a, display_lat_a)
+                B_wgs = (display_lon_b, display_lat_b)
+                # 构建障碍物多边形列表（用于绕行算法）
+                detour_points = generate_detour_route(A_wgs, B_wgs, st.session_state.obstacles, flight_height)
+                if len(detour_points) == 2:
+                    st.success("✅ 无冲突，无需绕行")
+                    st.session_state.detour_route = None
+                else:
+                    st.success(f"✅ 已生成绕行航线，共 {len(detour_points)} 个航点")
+                    st.session_state.detour_route = detour_points
+                st.rerun()
+
+        # 清除绕行航线按钮
+        if st.button("清除绕行航线"):
+            st.session_state.detour_route = None
+            st.rerun()
+
         if st.button("清除所有障碍物"):
             st.session_state.obstacles = []
-            st.success("已清除所有障碍物")
+            st.session_state.detour_route = None
             st.rerun()
 
     with col2:
-        # 地图中心点
         map_center = [display_lat_a, display_lon_a]
-
         m = folium.Map(
-            location=map_center,
-            zoom_start=17,
+            location=map_center, zoom_start=17,
             tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
             attr='Esri World Imagery',
-            name='Esri 卫星图',
         )
 
-        # 绘制航线
+        # 绘制原始航线（黄色）
         folium.PolyLine(
             locations=[[display_lat_a, display_lon_a], [display_lat_b, display_lon_b]],
-            color="yellow",
-            weight=5,
-            opacity=0.8,
-            popup="规划航线"
+            color="yellow", weight=5, opacity=0.8, popup="原始航线"
         ).add_to(m)
 
-        # 起点/终点标记
-        folium.Marker(
-            [display_lat_a, display_lon_a],
-            popup=f"起点 A (高度:{height}m)",
-            icon=folium.Icon(color='red', icon='play')
-        ).add_to(m)
-        folium.Marker(
-            [display_lat_b, display_lon_b],
-            popup="终点 B",
-            icon=folium.Icon(color='green', icon='stop')
-        ).add_to(m)
+        # 绘制绕行航线（蓝色）
+        if hasattr(st.session_state, 'detour_route') and st.session_state.detour_route:
+            detour_locs = [[lat, lng] for lng, lat in st.session_state.detour_route]
+            folium.PolyLine(
+                locations=detour_locs, color="blue", weight=4, opacity=0.9,
+                popup="绕行航线"
+            ).add_to(m)
+            # 添加航点标记
+            for i, (lng, lat) in enumerate(st.session_state.detour_route):
+                folium.Marker(
+                    [lat, lng], popup=f"航点 {i}", icon=folium.Icon(color='blue', icon='info-sign')
+                ).add_to(m)
 
-        # 绘制所有已存储的障碍物（带高度信息）
+        # 起点终点标记
+        folium.Marker([display_lat_a, display_lon_a], popup=f"起点 A (高度:{flight_height}m)", icon=folium.Icon(color='red', icon='play')).add_to(m)
+        folium.Marker([display_lat_b, display_lon_b], popup="终点 B", icon=folium.Icon(color='green', icon='stop')).add_to(m)
+
+        # 绘制障碍物
         for idx, obs in enumerate(st.session_state.obstacles):
-            vertices = obs["vertices"]   # [(lng, lat), ...]
-            # 转换为 folium 需要的 [lat, lng] 格式
-            poly_folium = [[lat, lng] for lng, lat in vertices]
+            poly_folium = [[lat, lng] for lng, lat in obs["vertices"]]
             folium.Polygon(
-                locations=poly_folium,
-                color="red",
-                weight=3,
-                fill=True,
-                fill_color="red",
-                fill_opacity=0.3,
+                locations=poly_folium, color="red", weight=3, fill=True, fill_color="red", fill_opacity=0.3,
                 popup=f"障碍物 {idx+1}\n高度: {obs['height']} m"
             ).add_to(m)
 
-        # 添加绘图工具
+        # 绘图工具
         draw = Draw(
-            draw_options={
-                "polyline": False,
-                "rectangle": True,
-                "circle": False,
-                "marker": False,
-                "circlemarker": False,
-                "polygon": True,
-            },
+            draw_options={"polyline": False, "rectangle": True, "circle": False, "marker": False, "circlemarker": False, "polygon": True},
             edit_options={"edit": True, "remove": True}
         )
         draw.add_to(m)
-
-        # 渲染地图
         output = st_folium(m, width=800, height=500, returned_objects=["last_active_drawing"])
 
-        # 处理新绘制的图形（添加为新障碍物，使用当前默认高度）
+        # 处理新绘制的障碍物
         if output and output.get("last_active_drawing"):
             drawing = output["last_active_drawing"]
             geom_type = drawing.get("geometry", {}).get("type")
             coords = drawing.get("geometry", {}).get("coordinates")
             if geom_type == "Polygon" and coords:
-                ring = coords[0]   # [[lng, lat], ...]
+                ring = coords[0]
                 poly_wgs84 = [(lng, lat) for lng, lat in ring]
-                # 检查是否已存在相同多边形（避免重复添加）
                 exists = any(obs["vertices"] == poly_wgs84 for obs in st.session_state.obstacles)
                 if not exists:
-                    new_obstacle = {
-                        "vertices": poly_wgs84,
-                        "height": st.session_state.default_obstacle_height
-                    }
-                    st.session_state.obstacles.append(new_obstacle)
-                    st.success(f"已添加障碍物多边形（高度 {new_obstacle['height']} m）")
+                    new_obs = {"vertices": poly_wgs84, "height": st.session_state.default_obstacle_height}
+                    st.session_state.obstacles.append(new_obs)
+                    st.success(f"已添加障碍物（高度 {new_obs['height']} m）")
                     st.rerun()
             elif geom_type == "Rectangle" and coords:
-                lng1, lat1 = coords[0]
-                lng2, lat2 = coords[1]
-                rect = [
-                    (lng1, lat1),
-                    (lng2, lat1),
-                    (lng2, lat2),
-                    (lng1, lat2)
-                ]
+                lng1, lat1 = coords[0]; lng2, lat2 = coords[1]
+                rect = [(lng1, lat1), (lng2, lat1), (lng2, lat2), (lng1, lat2)]
                 exists = any(obs["vertices"] == rect for obs in st.session_state.obstacles)
                 if not exists:
-                    new_obstacle = {
-                        "vertices": rect,
-                        "height": st.session_state.default_obstacle_height
-                    }
-                    st.session_state.obstacles.append(new_obstacle)
-                    st.success(f"已添加矩形障碍物（高度 {new_obstacle['height']} m）")
+                    new_obs = {"vertices": rect, "height": st.session_state.default_obstacle_height}
+                    st.session_state.obstacles.append(new_obs)
+                    st.success(f"已添加矩形障碍物（高度 {new_obs['height']} m）")
                     st.rerun()
 
-    # 侧边栏显示障碍物总数
-    st.sidebar.metric("障碍物总数", len(st.session_state.obstacles))
-
-# ========== 页面2：飞行监控（保持不变）==========
+# ========== 页面2：飞行监控 ==========
 elif page == "飞行监控":
     st.header("✈️ 飞行监控 (心跳包实时状态)")
-
     placeholder = st.empty()
-
-    if st.button("开始接收实时数据", key="btn_monitor_v8"):
+    if st.button("开始接收实时数据", key="btn_monitor_v9"):
         for _ in range(50):
             packet = st.session_state.sim.generate_packet()
             st.session_state.history.append(packet)
             plot_df = pd.DataFrame(st.session_state.history[-20:])
-
             with placeholder.container():
                 m1, m2, m3 = st.columns(3)
                 avg_rtt, loss_rate = st.session_state.sim.get_summary(st.session_state.history)
