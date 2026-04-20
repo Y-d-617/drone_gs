@@ -45,11 +45,11 @@ def gcj02_to_wgs84(lng, lat):
 st.set_page_config(page_title="无人机地面站监控系统", layout="wide")
 
 # --- 强制重置逻辑 ---
-if "app_version" not in st.session_state or st.session_state.app_version != "v5_unified":
+if "app_version" not in st.session_state or st.session_state.app_version != "v6_unified_fixed":
     st.session_state.sim = HeartbeatSimulator()
     st.session_state.history = []
     st.session_state.obstacles = []          # 存储障碍物多边形顶点列表 (WGS-84)
-    st.session_state.app_version = "v5_unified"
+    st.session_state.app_version = "v6_unified_fixed"
 
 # --- 侧边栏导航 ---
 st.sidebar.title("🧭 导航控制")
@@ -57,7 +57,7 @@ page = st.sidebar.radio("请选择功能页面", ["航线规划", "飞行监控"
 
 st.sidebar.divider()
 coord_mode = st.sidebar.radio("坐标系设置", ["WGS-84", "GCJ-02"], index=1)
-st.sidebar.info("⚠️ 两种模式显示位置已统一（基于 WGS-84 存储，自动转换显示）")
+st.sidebar.info("⚠️ 两种模式显示位置完全相同（均自动转换为 GCJ-02 匹配卫星图）")
 
 # --- 页面1：航线规划（障碍物圈选）---
 if page == "航线规划":
@@ -72,7 +72,7 @@ if page == "航线规划":
         lon_b = st.number_input("终点 B 经度", value=118.7495, format="%.6f")
         height = st.slider("设定飞行高度 (m)", 0, 100, 50)
 
-        # 统一转换为 GCJ-02 用于显示（无论侧边栏选什么）
+        # 始终转换为 GCJ-02 用于显示（无论侧边栏选项）
         display_lon_a, display_lat_a = wgs84_to_gcj02(lon_a, lat_a)
         display_lon_b, display_lat_b = wgs84_to_gcj02(lon_b, lat_b)
 
@@ -198,7 +198,7 @@ elif page == "飞行监控":
 
     placeholder = st.empty()
 
-    if st.button("开始接收实时数据", key="btn_monitor_v5"):
+    if st.button("开始接收实时数据", key="btn_monitor_v6"):
         for _ in range(50):
             packet = st.session_state.sim.generate_packet()
             st.session_state.history.append(packet)
