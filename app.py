@@ -20,7 +20,7 @@ st.sidebar.title("🧭 导航控制")
 page = st.sidebar.radio("请选择功能页面", ["航线规划", "飞行监控"])
 
 st.sidebar.divider()
-coord_mode = st.sidebar.radio("坐标系设置", ["WGS-84", "GCJ-02"], index=1)
+coord_mode = st.sidebar.radio("坐标系设置", ["GCJ-02", "WGS-84"], index=1)
 
 # --- 页面1：航线规划 ---
 if page == "航线规划":
