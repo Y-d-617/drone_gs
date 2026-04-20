@@ -8,12 +8,9 @@ from utils import wgs84_to_gcj02
 from heartbeat_sim import HeartbeatSimulator
 import math
 
-# ========== 坐标转换辅助函数 ==========
+# ========== GCJ-02 转 WGS-84 辅助函数 ==========
 def gcj02_to_wgs84(lng, lat):
-    """
-    将 GCJ-02 坐标转换为 WGS-84 坐标（近似可逆算法）
-    参考：https://github.com/wandergis/coordTransform_py
-    """
+    """将 GCJ-02 坐标转换为 WGS-84（近似可逆）"""
     a = 6378245.0
     ee = 0.00669342162296594323
     PI = math.pi
@@ -47,12 +44,12 @@ def gcj02_to_wgs84(lng, lat):
 # 页面基础配置
 st.set_page_config(page_title="无人机地面站监控系统", layout="wide")
 
-# --- 强制重置逻辑 (防止旧代码缓存导致的 NameError) ---
-if "app_version" not in st.session_state or st.session_state.app_version != "v4_obstacle":
+# --- 强制重置逻辑 ---
+if "app_version" not in st.session_state or st.session_state.app_version != "v5_unified":
     st.session_state.sim = HeartbeatSimulator()
     st.session_state.history = []
     st.session_state.obstacles = []          # 存储障碍物多边形顶点列表 (WGS-84)
-    st.session_state.app_version = "v4_obstacle"
+    st.session_state.app_version = "v5_unified"
 
 # --- 侧边栏导航 ---
 st.sidebar.title("🧭 导航控制")
@@ -60,31 +57,24 @@ page = st.sidebar.radio("请选择功能页面", ["航线规划", "飞行监控"
 
 st.sidebar.divider()
 coord_mode = st.sidebar.radio("坐标系设置", ["WGS-84", "GCJ-02"], index=1)
+st.sidebar.info("⚠️ 两种模式显示位置已统一（基于 WGS-84 存储，自动转换显示）")
 
-# --- 页面1：航线规划（含障碍物圈选）---
+# --- 页面1：航线规划（障碍物圈选）---
 if page == "航线规划":
     st.header("🗺️ 航线规划 + 障碍物圈选 (高德卫星地图)")
 
     col1, col2 = st.columns([1, 2])
     with col1:
-        st.subheader("📍 坐标输入")
-        lat_a = st.number_input("起点 A 纬度 (WGS-84)", value=32.2322, format="%.6f")
-        lon_a = st.number_input("起点 A 经度 (WGS-84)", value=118.7490, format="%.6f")
-        lat_b = st.number_input("终点 B 纬度 (WGS-84)", value=32.2343, format="%.6f")
-        lon_b = st.number_input("终点 B 经度 (WGS-84)", value=118.7495, format="%.6f")
+        st.subheader("📍 坐标输入 (WGS-84)")
+        lat_a = st.number_input("起点 A 纬度", value=32.2322, format="%.6f")
+        lon_a = st.number_input("起点 A 经度", value=118.7490, format="%.6f")
+        lat_b = st.number_input("终点 B 纬度", value=32.2343, format="%.6f")
+        lon_b = st.number_input("终点 B 经度", value=118.7495, format="%.6f")
         height = st.slider("设定飞行高度 (m)", 0, 100, 50)
 
-        # 将用户输入的 WGS-84 坐标转换为 GCJ-02 用于地图显示
-        if coord_mode == "GCJ-02":
-            # 强制使用 GCJ-02 显示（高德底图要求）
-            display_lon_a, display_lat_a = wgs84_to_gcj02(lon_a, lat_a)
-            display_lon_b, display_lat_b = wgs84_to_gcj02(lon_b, lat_b)
-            st.success("已启用 GCJ-02 坐标转换，位置与卫星底图匹配")
-        else:
-            # WGS-84 模式也显示转换后的坐标（否则偏移）——为了地图正确，总是转换
-            display_lon_a, display_lat_a = wgs84_to_gcj02(lon_a, lat_a)
-            display_lon_b, display_lat_b = wgs84_to_gcj02(lon_b, lat_b)
-            st.info("当前为 WGS-84 输入，但地图已自动转换为 GCJ-02 显示")
+        # 统一转换为 GCJ-02 用于显示（无论侧边栏选什么）
+        display_lon_a, display_lat_a = wgs84_to_gcj02(lon_a, lat_a)
+        display_lon_b, display_lat_b = wgs84_to_gcj02(lon_b, lat_b)
 
         # 障碍物管理按钮
         st.subheader("🚧 障碍物管理")
@@ -94,7 +84,7 @@ if page == "航线规划":
             st.rerun()
 
     with col2:
-        # 创建地图中心点（使用起点转换后的 GCJ-02 坐标）
+        # 创建地图中心点（使用转换后的 GCJ-02 坐标）
         map_center = [display_lat_a, display_lon_a]
 
         m = folium.Map(
@@ -121,7 +111,7 @@ if page == "航线规划":
             popup="规划航线"
         ).add_to(m)
 
-        # 添加起点/终点标记（GCJ-02）
+        # 添加起点/终点标记
         folium.Marker(
             [display_lat_a, display_lon_a],
             popup=f"起点 A (高度:{height}m)",
@@ -133,9 +123,8 @@ if page == "航线规划":
             icon=folium.Icon(color='green', icon='stop')
         ).add_to(m)
 
-        # ========== 绘制已存储的障碍物多边形 ==========
+        # ========== 绘制已存储的障碍物（存储为 WGS-84，显示时转换为 GCJ-02）==========
         for idx, poly_wgs84 in enumerate(st.session_state.obstacles):
-            # 将多边形顶点从 WGS-84 转换为 GCJ-02
             poly_gcj02 = []
             for lng, lat in poly_wgs84:
                 gcj_lng, gcj_lat = wgs84_to_gcj02(lng, lat)
@@ -150,15 +139,15 @@ if page == "航线规划":
                 popup=f"障碍物 {idx+1}"
             ).add_to(m)
 
-        # 添加 Draw 控件（支持绘制多边形、矩形、圆等，我们只关心多边形）
+        # 添加 Draw 控件（支持绘制多边形、矩形）
         draw = Draw(
             draw_options={
                 "polyline": False,
-                "rectangle": True,      # 矩形可作为快速圈选
+                "rectangle": True,
                 "circle": False,
                 "marker": False,
                 "circlemarker": False,
-                "polygon": True,        # 多边形
+                "polygon": True,
             },
             edit_options={"edit": True, "remove": True}
         )
@@ -167,28 +156,22 @@ if page == "航线规划":
         # 渲染地图并获取交互数据
         output = st_folium(m, width=800, height=500, returned_objects=["last_active_drawing"])
 
-        # 处理用户新绘制的图形（多边形或矩形）
+        # 处理用户新绘制的图形（转换为 WGS-84 存储）
         if output and output.get("last_active_drawing"):
             drawing = output["last_active_drawing"]
             geom_type = drawing.get("geometry", {}).get("type")
             coords = drawing.get("geometry", {}).get("coordinates")
             if geom_type == "Polygon" and coords:
-                # 提取多边形顶点 (GCJ-02 坐标，格式: [[lng, lat], ...])
-                # coords 是一个三维数组：[[[lng, lat], ...]]，取第一个环
                 ring = coords[0]
-                # 转换为 WGS-84 并存储
                 poly_wgs84 = []
                 for lng, lat in ring:
                     wgs_lng, wgs_lat = gcj02_to_wgs84(lng, lat)
                     poly_wgs84.append((wgs_lng, wgs_lat))
-                # 避免重复添加（简单检查是否已存在相同多边形）
                 if poly_wgs84 not in st.session_state.obstacles:
                     st.session_state.obstacles.append(poly_wgs84)
                     st.success(f"已添加障碍物多边形，共 {len(poly_wgs84)} 个顶点")
                     st.rerun()
             elif geom_type == "Rectangle" and coords:
-                # 矩形转换为多边形存储（四个顶点）
-                # coords 格式: [[lng1, lat1], [lng2, lat2]] 表示对角线
                 lng1, lat1 = coords[0]
                 lng2, lat2 = coords[1]
                 rect_gcj02 = [
@@ -215,7 +198,7 @@ elif page == "飞行监控":
 
     placeholder = st.empty()
 
-    if st.button("开始接收实时数据", key="btn_monitor_v4"):
+    if st.button("开始接收实时数据", key="btn_monitor_v5"):
         for _ in range(50):
             packet = st.session_state.sim.generate_packet()
             st.session_state.history.append(packet)
