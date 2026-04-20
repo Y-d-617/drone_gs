@@ -7,7 +7,7 @@ from streamlit_folium import st_folium
 from heartbeat_sim import HeartbeatSimulator
 import math
 
-# ========== GCJ-02 转 WGS-84 精确函数（用于用户输入转换）==========
+# ========== GCJ-02 转 WGS-84 精确函数 ==========
 def gcj02_to_wgs84(lng, lat):
     """GCJ-02 -> WGS-84"""
     a = 6378245.0
@@ -44,11 +44,20 @@ def gcj02_to_wgs84(lng, lat):
 st.set_page_config(page_title="无人机地面站监控系统", layout="wide")
 
 # 初始化 session_state
-if "app_version" not in st.session_state or st.session_state.app_version != "v7_wgs84_satellite":
+if "app_version" not in st.session_state or st.session_state.app_version != "v8_obstacle_height":
     st.session_state.sim = HeartbeatSimulator()
     st.session_state.history = []
-    st.session_state.obstacles = []          # 存储障碍物多边形顶点列表 (WGS-84)
-    st.session_state.app_version = "v7_wgs84_satellite"
+    # 障碍物存储格式: [{"vertices": [(lng,lat),...], "height": float}, ...]
+    st.session_state.obstacles = []
+    st.session_state.default_obstacle_height = 30.0   # 默认高度30米
+    st.session_state.app_version = "v8_obstacle_height"
+else:
+    # 兼容旧版数据：如果旧障碍物是纯列表，转换为带高度的字典
+    if st.session_state.obstacles and isinstance(st.session_state.obstacles[0], list):
+        new_obstacles = []
+        for poly in st.session_state.obstacles:
+            new_obstacles.append({"vertices": poly, "height": 30.0})
+        st.session_state.obstacles = new_obstacles
 
 # 侧边栏
 st.sidebar.title("🧭 导航控制")
@@ -61,6 +70,41 @@ st.sidebar.info("✅ 卫星图底图：Esri World Imagery (WGS-84)\n若选择 GC
 if page == "航线规划":
     st.header("🗺️ 航线规划 + 障碍物圈选 (WGS-84 卫星图)")
 
+    # 侧边栏：默认障碍物高度设置
+    st.sidebar.subheader("🚧 障碍物默认高度")
+    default_height = st.sidebar.number_input(
+        "新绘制障碍物的默认高度 (米)", 
+        min_value=0.0, 
+        max_value=200.0, 
+        value=st.session_state.default_obstacle_height,
+        step=5.0
+    )
+    st.session_state.default_obstacle_height = default_height
+
+    st.sidebar.divider()
+    st.sidebar.subheader("📋 已添加的障碍物")
+    # 显示并管理已有障碍物
+    if not st.session_state.obstacles:
+        st.sidebar.write("暂无障碍物")
+    else:
+        for idx, obs in enumerate(st.session_state.obstacles):
+            with st.sidebar.expander(f"障碍物 {idx+1} (高度: {obs['height']} m)"):
+                new_height = st.number_input(
+                    f"高度 (m)", 
+                    min_value=0.0, 
+                    max_value=200.0, 
+                    value=obs['height'],
+                    key=f"height_{idx}",
+                    step=5.0
+                )
+                if new_height != obs['height']:
+                    obs['height'] = new_height
+                    st.rerun()
+                if st.button(f"🗑️ 删除障碍物 {idx+1}", key=f"del_{idx}"):
+                    st.session_state.obstacles.pop(idx)
+                    st.rerun()
+                st.caption(f"顶点数: {len(obs['vertices'])}")
+
     col1, col2 = st.columns([1, 2])
     with col1:
         st.subheader("📍 坐标输入")
@@ -70,20 +114,17 @@ if page == "航线规划":
         lon_b = st.number_input("终点 B 经度", value=118.7495, format="%.6f")
         height = st.slider("设定飞行高度 (m)", 0, 100, 50)
 
-        # 根据侧边栏选项，将输入坐标转换为 WGS-84（用于地图显示）
+        # 坐标转换
         if coord_mode == "GCJ-02":
-            # 用户输入的是 GCJ-02，自动转换为 WGS-84
             display_lon_a, display_lat_a = gcj02_to_wgs84(lon_a, lat_a)
             display_lon_b, display_lat_b = gcj02_to_wgs84(lon_b, lat_b)
             st.success("已自动将 GCJ-02 坐标转换为 WGS-84，匹配卫星图")
         else:
-            # 用户输入的就是 WGS-84，直接使用
             display_lon_a, display_lat_a = lon_a, lat_a
             display_lon_b, display_lat_b = lon_b, lat_b
             st.info("直接使用 WGS-84 坐标")
 
-        # 障碍物管理
-        st.subheader("🚧 障碍物管理")
+        # 辅助按钮
         if st.button("清除所有障碍物"):
             st.session_state.obstacles = []
             st.success("已清除所有障碍物")
@@ -93,7 +134,6 @@ if page == "航线规划":
         # 地图中心点
         map_center = [display_lat_a, display_lon_a]
 
-        # 创建 WGS-84 卫星图底图 (Esri World Imagery)
         m = folium.Map(
             location=map_center,
             zoom_start=17,
@@ -123,10 +163,11 @@ if page == "航线规划":
             icon=folium.Icon(color='green', icon='stop')
         ).add_to(m)
 
-        # 绘制已存储的障碍物（直接使用 WGS-84 坐标）
-        for idx, poly_wgs84 in enumerate(st.session_state.obstacles):
-            # poly_wgs84 格式: [(lng, lat), ...] 需要转为 [lat, lng]
-            poly_folium = [[lat, lng] for lng, lat in poly_wgs84]
+        # 绘制所有已存储的障碍物（带高度信息）
+        for idx, obs in enumerate(st.session_state.obstacles):
+            vertices = obs["vertices"]   # [(lng, lat), ...]
+            # 转换为 folium 需要的 [lat, lng] 格式
+            poly_folium = [[lat, lng] for lng, lat in vertices]
             folium.Polygon(
                 locations=poly_folium,
                 color="red",
@@ -134,10 +175,10 @@ if page == "航线规划":
                 fill=True,
                 fill_color="red",
                 fill_opacity=0.3,
-                popup=f"障碍物 {idx+1}"
+                popup=f"障碍物 {idx+1}\n高度: {obs['height']} m"
             ).add_to(m)
 
-        # 添加绘图工具（多边形、矩形）
+        # 添加绘图工具
         draw = Draw(
             draw_options={
                 "polyline": False,
@@ -151,24 +192,28 @@ if page == "航线规划":
         )
         draw.add_to(m)
 
-        # 渲染地图并获取交互数据
+        # 渲染地图
         output = st_folium(m, width=800, height=500, returned_objects=["last_active_drawing"])
 
-        # 处理新绘制的障碍物（直接使用 WGS-84 坐标）
+        # 处理新绘制的图形（添加为新障碍物，使用当前默认高度）
         if output and output.get("last_active_drawing"):
             drawing = output["last_active_drawing"]
             geom_type = drawing.get("geometry", {}).get("type")
             coords = drawing.get("geometry", {}).get("coordinates")
             if geom_type == "Polygon" and coords:
-                ring = coords[0]   # 格式 [[lng, lat], ...]
-                # 存储为 [(lng, lat), ...]
+                ring = coords[0]   # [[lng, lat], ...]
                 poly_wgs84 = [(lng, lat) for lng, lat in ring]
-                if poly_wgs84 not in st.session_state.obstacles:
-                    st.session_state.obstacles.append(poly_wgs84)
-                    st.success(f"已添加障碍物多边形，共 {len(poly_wgs84)} 个顶点")
+                # 检查是否已存在相同多边形（避免重复添加）
+                exists = any(obs["vertices"] == poly_wgs84 for obs in st.session_state.obstacles)
+                if not exists:
+                    new_obstacle = {
+                        "vertices": poly_wgs84,
+                        "height": st.session_state.default_obstacle_height
+                    }
+                    st.session_state.obstacles.append(new_obstacle)
+                    st.success(f"已添加障碍物多边形（高度 {new_obstacle['height']} m）")
                     st.rerun()
             elif geom_type == "Rectangle" and coords:
-                # 矩形对角线两点
                 lng1, lat1 = coords[0]
                 lng2, lat2 = coords[1]
                 rect = [
@@ -177,21 +222,26 @@ if page == "航线规划":
                     (lng2, lat2),
                     (lng1, lat2)
                 ]
-                if rect not in st.session_state.obstacles:
-                    st.session_state.obstacles.append(rect)
-                    st.success("已添加矩形障碍物")
+                exists = any(obs["vertices"] == rect for obs in st.session_state.obstacles)
+                if not exists:
+                    new_obstacle = {
+                        "vertices": rect,
+                        "height": st.session_state.default_obstacle_height
+                    }
+                    st.session_state.obstacles.append(new_obstacle)
+                    st.success(f"已添加矩形障碍物（高度 {new_obstacle['height']} m）")
                     st.rerun()
 
-    # 显示障碍物数量
-    st.sidebar.metric("已圈选障碍物数量", len(st.session_state.obstacles))
+    # 侧边栏显示障碍物总数
+    st.sidebar.metric("障碍物总数", len(st.session_state.obstacles))
 
-# ========== 页面2：飞行监控（完全保持不变）==========
+# ========== 页面2：飞行监控（保持不变）==========
 elif page == "飞行监控":
     st.header("✈️ 飞行监控 (心跳包实时状态)")
 
     placeholder = st.empty()
 
-    if st.button("开始接收实时数据", key="btn_monitor_v7"):
+    if st.button("开始接收实时数据", key="btn_monitor_v8"):
         for _ in range(50):
             packet = st.session_state.sim.generate_packet()
             st.session_state.history.append(packet)
