@@ -126,7 +126,6 @@ def get_first_conflict(A, B, obstacles, flight_height):
             continue
         if not polygon_intersects_segment(obs["vertices"], A, B):
             continue
-        # 计算第一个交点距离
         for i in range(len(obs["vertices"])):
             p1 = obs["vertices"][i]
             p2 = obs["vertices"][(i+1)%len(obs["vertices"])]
@@ -138,26 +137,35 @@ def get_first_conflict(A, B, obstacles, flight_height):
                     best_obs = obs
     return best_obs
 
-def detour_around_obstacle(A, B, obs):
-    """沿扩展矩形边界生成多个绕行航点（最多8个点），并选择最短边界路径"""
+def detour_around_obstacle(A, B, obs, safety_meters):
+    """
+    沿扩展矩形边界生成多个绕行航点，并选择最短路径（基于实际几何距离）
+    safety_meters: 安全距离（米）
+    """
     minx, miny, maxx, maxy = get_bounding_box(obs["vertices"])
-    expand = 0.0002  # 约20米
-    minx -= expand
-    miny -= expand
-    maxx += expand
-    maxy += expand
-    # 边界点（顺时针）：左下、下中、右下、右中、右上、上中、左上、左中
+    # 安全距离转换为经纬度偏移（1度≈111km）
+    offset_deg = safety_meters / 111000.0
+    minx -= offset_deg
+    miny -= offset_deg
+    maxx += offset_deg
+    maxy += offset_deg
+    # 边界点：矩形每条边三等分（共8个点，包括顶点）
     points = [
-        (minx, miny),
-        (minx + (maxx-minx)/2, miny),
-        (maxx, miny),
-        (maxx, miny + (maxy-miny)/2),
-        (maxx, maxy),
-        (minx + (maxx-minx)/2, maxy),
-        (minx, maxy),
-        (minx, miny + (maxy-miny)/2),
+        (minx, miny),                     # 左下
+        (minx + (maxx-minx)/3, miny),
+        (minx + 2*(maxx-minx)/3, miny),
+        (maxx, miny),                     # 右下
+        (maxx, miny + (maxy-miny)/3),
+        (maxx, miny + 2*(maxy-miny)/3),
+        (maxx, maxy),                     # 右上
+        (maxx - (maxx-minx)/3, maxy),
+        (maxx - 2*(maxx-minx)/3, maxy),
+        (minx, maxy),                     # 左上
+        (minx, maxy - (maxy-miny)/3),
+        (minx, maxy - 2*(maxy-miny)/3),
     ]
-    edges = [(points[i], points[(i+1)%8]) for i in range(8)]
+    # 闭合：首尾相连
+    edges = [(points[i], points[(i+1)%len(points)]) for i in range(len(points))]
     # 求直线与矩形的两个交点
     intersections = []
     for e in edges:
@@ -186,7 +194,7 @@ def detour_around_obstacle(A, B, obs):
     exit_idx = find_edge_index(p_exit)
     if enter_idx == -1 or exit_idx == -1:
         return [A, p_enter, p_exit, B]
-    # 顺时针路径
+    # 构建顺时针路径（索引增加）
     path_cw = [p_enter]
     idx = enter_idx
     while True:
@@ -196,10 +204,10 @@ def detour_around_obstacle(A, B, obs):
             break
         else:
             path_cw.append(next_pt)
-        idx = (idx + 1) % 8
+        idx = (idx + 1) % len(edges)
         if idx == enter_idx:
             break
-    # 逆时针路径
+    # 构建逆时针路径（索引减少）
     path_ccw = [p_enter]
     idx = enter_idx
     while True:
@@ -209,15 +217,22 @@ def detour_around_obstacle(A, B, obs):
             break
         else:
             path_ccw.append(prev_pt)
-        idx = (idx - 1) % 8
+        idx = (idx - 1) % len(edges)
         if idx == enter_idx:
             break
-    # 选择较短路径
-    path = path_cw if len(path_cw) <= len(path_ccw) else path_ccw
-    return [A] + path + [B]
+    # 计算路径总长度（欧氏距离）
+    def path_length(points):
+        total = 0.0
+        for i in range(len(points)-1):
+            total += math.hypot(points[i+1][0]-points[i][0], points[i+1][1]-points[i][1])
+        return total
+    len_cw = path_length(path_cw) + math.hypot(p_enter[0]-A[0], p_enter[1]-A[1]) + math.hypot(p_exit[0]-B[0], p_exit[1]-B[1])
+    len_ccw = path_length(path_ccw) + math.hypot(p_enter[0]-A[0], p_enter[1]-A[1]) + math.hypot(p_exit[0]-B[0], p_exit[1]-B[1])
+    chosen_path = path_cw if len_cw <= len_ccw else path_ccw
+    return [A] + chosen_path + [B]
 
-def generate_detour_route(A, B, obstacles, flight_height, max_iter=10):
-    """迭代处理多个障碍物，生成完整绕行航线（航点数量不固定）"""
+def generate_detour_route(A, B, obstacles, flight_height, safety_meters, max_iter=10):
+    """迭代处理多个障碍物，生成完整绕行航线（航点数量不固定，选择最短路径）"""
     current_route = [A, B]
     for _ in range(max_iter):
         new_route = [current_route[0]]
@@ -230,7 +245,7 @@ def generate_detour_route(A, B, obstacles, flight_height, max_iter=10):
                 new_route.append(seg_end)
             else:
                 conflict = True
-                detour_seg = detour_around_obstacle(seg_start, seg_end, obs)
+                detour_seg = detour_around_obstacle(seg_start, seg_end, obs, safety_meters)
                 new_route.extend(detour_seg[1:])
         if not conflict:
             return current_route
@@ -241,16 +256,16 @@ def generate_detour_route(A, B, obstacles, flight_height, max_iter=10):
 st.set_page_config(page_title="无人机地面站监控系统", layout="wide")
 
 # 初始化 session_state
-if "app_version" not in st.session_state or st.session_state.app_version != "v16_multiwaypoint":
+if "app_version" not in st.session_state or st.session_state.app_version != "v17_shortest_safe":
     st.session_state.sim = HeartbeatSimulator()
     st.session_state.history = []
     loaded = load_obstacles_from_file()
     st.session_state.obstacles = loaded if loaded else []
     st.session_state.default_obstacle_height = 30.0
+    st.session_state.safety_distance = 20.0  # 默认安全距离20米
     st.session_state.detour_route = None
-    st.session_state.app_version = "v16_multiwaypoint"
+    st.session_state.app_version = "v17_shortest_safe"
 else:
-    # 兼容旧数据
     if st.session_state.obstacles and isinstance(st.session_state.obstacles[0], list):
         new_obs = []
         for poly in st.session_state.obstacles:
@@ -267,7 +282,7 @@ st.sidebar.info("✅ 卫星图底图：Esri World Imagery (WGS-84)\n若选择 GC
 
 # ========== 页面1：航线规划 ==========
 if page == "航线规划":
-    st.header("🗺️ 航线规划 + 障碍物圈选 (多航点绕行)")
+    st.header("🗺️ 航线规划 + 障碍物圈选 (智能最短绕行)")
 
     st.sidebar.subheader("🚧 障碍物默认高度")
     default_h = st.sidebar.number_input(
@@ -276,6 +291,16 @@ if page == "航线规划":
         value=st.session_state.default_obstacle_height, step=5.0
     )
     st.session_state.default_obstacle_height = default_h
+    st.sidebar.divider()
+
+    st.sidebar.subheader("🛡️ 安全距离设置")
+    safety = st.sidebar.number_input(
+        "障碍物安全距离 (米)", 
+        min_value=0.0, max_value=200.0, 
+        value=st.session_state.safety_distance, step=5.0,
+        help="绕行路径与障碍物的最小距离（实际会向外扩展该距离）"
+    )
+    st.session_state.safety_distance = safety
     st.sidebar.divider()
     
     st.sidebar.subheader("📋 已添加的障碍物")
@@ -335,15 +360,20 @@ if page == "航线规划":
             st.info("直接使用 WGS-84 坐标")
 
         if st.button("✈️ 检测冲突并生成绕行航线"):
-            with st.spinner("正在计算绕行路径..."):
+            with st.spinner("正在计算最短绕行路径..."):
                 A_wgs = (display_lon_a, display_lat_a)
                 B_wgs = (display_lon_b, display_lat_b)
-                detour = generate_detour_route(A_wgs, B_wgs, st.session_state.obstacles, flight_height)
+                detour = generate_detour_route(
+                    A_wgs, B_wgs, 
+                    st.session_state.obstacles, 
+                    flight_height,
+                    st.session_state.safety_distance
+                )
                 if len(detour) == 2:
                     st.success("✅ 无冲突，无需绕行")
                     st.session_state.detour_route = None
                 else:
-                    st.success(f"✅ 已生成绕行航线，共 {len(detour)} 个航点")
+                    st.success(f"✅ 已生成最短绕行航线，共 {len(detour)} 个航点")
                     st.session_state.detour_route = detour
                 st.rerun()
         
@@ -371,7 +401,7 @@ if page == "航线规划":
             color="yellow", weight=5, opacity=0.8, popup="原始航线"
         ).add_to(m)
 
-        # 绕行航线（蓝色，支持多个航点）
+        # 绕行航线（蓝色，多航点）
         if st.session_state.get("detour_route"):
             detour_locs = [[lat, lng] for lng, lat in st.session_state.detour_route]
             folium.PolyLine(
@@ -433,7 +463,7 @@ if page == "航线规划":
 elif page == "飞行监控":
     st.header("✈️ 飞行监控 (心跳包实时状态)")
     placeholder = st.empty()
-    if st.button("开始接收实时数据", key="btn_monitor_v16"):
+    if st.button("开始接收实时数据", key="btn_monitor_v17"):
         for _ in range(50):
             packet = st.session_state.sim.generate_packet()
             st.session_state.history.append(packet)
