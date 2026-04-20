@@ -39,19 +39,9 @@ def gcj02_to_wgs84(lng, lat):
     wgs_lng = lng - dlng
     return wgs_lng, wgs_lat
 
-# ========== 几何辅助函数（无外部依赖）==========
-def point_on_segment(px, py, x1, y1, x2, y2):
-    """检查点是否在线段上（含端点）"""
-    cross = (px - x1) * (y2 - y1) - (py - y1) * (x2 - x1)
-    if abs(cross) > 1e-9:
-        return False
-    dot = (px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)
-    if dot < 0 or dot > (x2 - x1)*(x2 - x1) + (y2 - y1)*(y2 - y1):
-        return False
-    return True
-
+# ========== 纯数学几何函数（无 shapely）==========
 def segments_intersect(x1, y1, x2, y2, x3, y3, x4, y4):
-    """判断两线段是否相交"""
+    """判断线段 (x1,y1)-(x2,y2) 和 (x3,y3)-(x4,y4) 是否相交"""
     def cross(ax, ay, bx, by):
         return ax*by - ay*bx
     def on_segment(px, py, qx, qy, rx, ry):
@@ -69,18 +59,17 @@ def segments_intersect(x1, y1, x2, y2, x3, y3, x4, y4):
     return (o1 > 0) != (o2 > 0) and (o3 > 0) != (o4 > 0)
 
 def polygon_intersects_segment(poly_vertices, seg_start, seg_end):
-    """检查多边形（顶点列表，闭合）是否与线段相交"""
-    # 先检查线段是否与任一边相交
+    """检查多边形是否与线段相交（包括包含关系）"""
+    # 检查线段是否与任意边相交
     n = len(poly_vertices)
     for i in range(n):
         x1, y1 = poly_vertices[i]
         x2, y2 = poly_vertices[(i+1)%n]
         if segments_intersect(seg_start[0], seg_start[1], seg_end[0], seg_end[1], x1, y1, x2, y2):
             return True
-    # 检查线段是否完全在多边形内部（取中点）
+    # 检查线段中点是否在多边形内部（射线法）
     mid_x = (seg_start[0] + seg_end[0]) / 2
     mid_y = (seg_start[1] + seg_end[1]) / 2
-    # 射线法判断点是否在多边形内
     inside = False
     for i in range(n):
         x1, y1 = poly_vertices[i]
@@ -90,36 +79,29 @@ def polygon_intersects_segment(poly_vertices, seg_start, seg_end):
     return inside
 
 def get_bounding_box(poly_vertices):
-    """获取多边形外接矩形 (minx, miny, maxx, maxy)"""
+    """返回多边形外接矩形 (minx, miny, maxx, maxy)"""
     xs = [v[0] for v in poly_vertices]
     ys = [v[1] for v in poly_vertices]
     return min(xs), min(ys), max(xs), max(ys)
 
 def generate_detour_route(A, B, obstacles, flight_height):
-    """
-    生成绕行航线（简易版：绕过第一个相交障碍物的外接矩形）
-    A, B: (lng, lat)
-    obstacles: [{"vertices": [(lng,lat)], "height": float}]
-    返回: 绕行点列表（包含起点和终点）
-    """
-    # 检查是否有需要绕行的障碍物
-    need_detour = False
+    """生成绕行航线（绕过第一个相交障碍物的外接矩形）"""
+    # 找出第一个需要绕行的障碍物
     target_obs = None
     for obs in obstacles:
         if flight_height < obs["height"]:
             if polygon_intersects_segment(obs["vertices"], A, B):
-                need_detour = True
                 target_obs = obs
                 break
-    if not need_detour:
+    if target_obs is None:
         return [A, B]
-
-    # 获取障碍物外接矩形
+    
+    # 获取外接矩形中心
     minx, miny, maxx, maxy = get_bounding_box(target_obs["vertices"])
-    # 矩形中心
     cx = (minx + maxx) / 2
     cy = (miny + maxy) / 2
-    # 计算AB方向单位向量
+    
+    # AB方向单位向量
     dx = B[0] - A[0]
     dy = B[1] - A[1]
     length = math.hypot(dx, dy)
@@ -127,15 +109,16 @@ def generate_detour_route(A, B, obstacles, flight_height):
         return [A, B]
     dx /= length
     dy /= length
+    
     # 垂直向量
     perp_x = -dy
     perp_y = dx
-    # 偏移距离（约50米，转换为经纬度偏移量：1度约111km，0.0005度≈55米）
-    offset = 0.0005
-    # 生成两个绕行点（左右两侧）
+    offset = 0.0005  # 约50米
+    
     left = (cx + perp_x * offset, cy + perp_y * offset)
     right = (cx - perp_x * offset, cy - perp_y * offset)
-    # 按距离A点距离排序，确保航线顺序正确
+    
+    # 按距离起点排序
     dist_left = math.hypot(left[0]-A[0], left[1]-A[1])
     dist_right = math.hypot(right[0]-A[0], right[1]-A[1])
     if dist_left < dist_right:
@@ -143,7 +126,7 @@ def generate_detour_route(A, B, obstacles, flight_height):
     else:
         return [A, right, left, B]
 
-# 页面配置
+# ========== Streamlit 页面配置 ==========
 st.set_page_config(page_title="无人机地面站监控系统", layout="wide")
 
 # 初始化 session_state
@@ -155,7 +138,7 @@ if "app_version" not in st.session_state or st.session_state.app_version != "v10
     st.session_state.detour_route = None
     st.session_state.app_version = "v10_noshapely"
 else:
-    # 兼容旧数据
+    # 兼容旧数据：将纯列表转换为带高度的字典
     if st.session_state.obstacles and isinstance(st.session_state.obstacles[0], list):
         new_obstacles = []
         for poly in st.session_state.obstacles:
@@ -173,7 +156,7 @@ st.sidebar.info("✅ 卫星图底图：Esri World Imagery (WGS-84)\n若选择 GC
 if page == "航线规划":
     st.header("🗺️ 航线规划 + 障碍物圈选 (WGS-84 卫星图)")
 
-    # 侧边栏障碍物管理
+    # 侧边栏：障碍物默认高度
     st.sidebar.subheader("🚧 障碍物默认高度")
     default_height = st.sidebar.number_input(
         "新绘制障碍物的默认高度 (米)", 
@@ -182,6 +165,8 @@ if page == "航线规划":
     )
     st.session_state.default_obstacle_height = default_height
     st.sidebar.divider()
+    
+    # 侧边栏：已有障碍物管理
     st.sidebar.subheader("📋 已添加的障碍物")
     if not st.session_state.obstacles:
         st.sidebar.write("暂无障碍物")
@@ -211,7 +196,7 @@ if page == "航线规划":
         lon_b = st.number_input("终点 B 经度", value=118.7495, format="%.6f")
         flight_height = st.slider("设定飞行高度 (m)", 0, 100, 50)
 
-        # 坐标转换
+        # 坐标转换（自动适配卫星图）
         if coord_mode == "GCJ-02":
             display_lon_a, display_lat_a = gcj02_to_wgs84(lon_a, lat_a)
             display_lon_b, display_lat_b = gcj02_to_wgs84(lon_b, lat_b)
@@ -221,24 +206,24 @@ if page == "航线规划":
             display_lon_b, display_lat_b = lon_b, lat_b
             st.info("直接使用 WGS-84 坐标")
 
-        # 绕行检测按钮
+        # 绕行控制按钮
         if st.button("✈️ 检测冲突并生成绕行航线"):
             with st.spinner("正在计算绕行路径..."):
                 A_wgs = (display_lon_a, display_lat_a)
                 B_wgs = (display_lon_b, display_lat_b)
-                detour_points = generate_detour_route(A_wgs, B_wgs, st.session_state.obstacles, flight_height)
-                if len(detour_points) == 2:
+                detour = generate_detour_route(A_wgs, B_wgs, st.session_state.obstacles, flight_height)
+                if len(detour) == 2:
                     st.success("✅ 无冲突，无需绕行")
                     st.session_state.detour_route = None
                 else:
-                    st.success(f"✅ 已生成绕行航线，共 {len(detour_points)} 个航点")
-                    st.session_state.detour_route = detour_points
+                    st.success(f"✅ 已生成绕行航线，共 {len(detour)} 个航点")
+                    st.session_state.detour_route = detour
                 st.rerun()
-
+        
         if st.button("清除绕行航线"):
             st.session_state.detour_route = None
             st.rerun()
-
+        
         if st.button("清除所有障碍物"):
             st.session_state.obstacles = []
             st.session_state.detour_route = None
@@ -274,7 +259,7 @@ if page == "航线规划":
         folium.Marker([display_lat_a, display_lon_a], popup=f"起点 A (高度:{flight_height}m)", icon=folium.Icon(color='red', icon='play')).add_to(m)
         folium.Marker([display_lat_b, display_lon_b], popup="终点 B", icon=folium.Icon(color='green', icon='stop')).add_to(m)
 
-        # 绘制障碍物
+        # 绘制所有障碍物
         for idx, obs in enumerate(st.session_state.obstacles):
             poly_folium = [[lat, lng] for lng, lat in obs["vertices"]]
             folium.Polygon(
@@ -282,7 +267,7 @@ if page == "航线规划":
                 popup=f"障碍物 {idx+1}\n高度: {obs['height']} m"
             ).add_to(m)
 
-        # 绘图工具
+        # 绘图工具（多边形、矩形）
         draw = Draw(
             draw_options={"polyline": False, "rectangle": True, "circle": False, "marker": False, "circlemarker": False, "polygon": True},
             edit_options={"edit": True, "remove": True}
@@ -311,7 +296,7 @@ if page == "航线规划":
                 if not exists:
                     new_obs = {"vertices": rect, "height": st.session_state.default_obstacle_height}
                     st.session_state.obstacles.append(new_obs)
-                    st.success(f"已添加矩形障碍物（高度 {new_obs['height']} m）")
+                    st.success("已添加矩形障碍物")
                     st.rerun()
 
 # ========== 页面2：飞行监控 ==========
