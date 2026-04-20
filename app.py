@@ -60,14 +60,12 @@ def segments_intersect(x1, y1, x2, y2, x3, y3, x4, y4):
 
 def polygon_intersects_segment(poly_vertices, seg_start, seg_end):
     """检查多边形是否与线段相交（包括包含关系）"""
-    # 检查线段是否与任意边相交
     n = len(poly_vertices)
     for i in range(n):
         x1, y1 = poly_vertices[i]
         x2, y2 = poly_vertices[(i+1)%n]
         if segments_intersect(seg_start[0], seg_start[1], seg_end[0], seg_end[1], x1, y1, x2, y2):
             return True
-    # 检查线段中点是否在多边形内部（射线法）
     mid_x = (seg_start[0] + seg_end[0]) / 2
     mid_y = (seg_start[1] + seg_end[1]) / 2
     inside = False
@@ -84,8 +82,25 @@ def get_bounding_box(poly_vertices):
     ys = [v[1] for v in poly_vertices]
     return min(xs), min(ys), max(xs), max(ys)
 
+def point_in_polygon(point, poly_vertices):
+    """射线法判断点是否在多边形内部"""
+    x, y = point
+    inside = False
+    n = len(poly_vertices)
+    for i in range(n):
+        x1, y1 = poly_vertices[i]
+        x2, y2 = poly_vertices[(i+1)%n]
+        if ((y1 > y) != (y2 > y)) and (x < (x2 - x1) * (y - y1) / (y2 - y1) + x1):
+            inside = not inside
+    return inside
+
 def generate_detour_route(A, B, obstacles, flight_height):
-    """生成绕行航线（绕过第一个相交障碍物的外接矩形）"""
+    """
+    生成绕行航线（确保绕行点位于障碍物外部）
+    A, B: (lng, lat)
+    obstacles: [{"vertices": [(lng,lat)], "height": float}]
+    返回: 绕行点列表（包含起点和终点）
+    """
     # 找出第一个需要绕行的障碍物
     target_obs = None
     for obs in obstacles:
@@ -95,13 +110,10 @@ def generate_detour_route(A, B, obstacles, flight_height):
                 break
     if target_obs is None:
         return [A, B]
-    
-    # 获取外接矩形中心
+
+    # 获取障碍物外接矩形
     minx, miny, maxx, maxy = get_bounding_box(target_obs["vertices"])
-    cx = (minx + maxx) / 2
-    cy = (miny + maxy) / 2
-    
-    # AB方向单位向量
+    # 计算AB方向
     dx = B[0] - A[0]
     dy = B[1] - A[1]
     length = math.hypot(dx, dy)
@@ -109,22 +121,37 @@ def generate_detour_route(A, B, obstacles, flight_height):
         return [A, B]
     dx /= length
     dy /= length
-    
-    # 垂直向量
+    # 垂直向量（单位）
     perp_x = -dy
     perp_y = dx
-    offset = 0.0005  # 约50米
+
+    # 生成两个候选方向的外侧点：基于矩形中心向外侧偏移，动态调整距离直到点在多边形外
+    center_x = (minx + maxx) / 2
+    center_y = (miny + maxy) / 2
     
-    left = (cx + perp_x * offset, cy + perp_y * offset)
-    right = (cx - perp_x * offset, cy - perp_y * offset)
+    def get_outside_point(direction_x, direction_y, start_dist=0.0005, max_dist=0.01):
+        """沿指定方向移动，直到点不在多边形内部"""
+        dist = start_dist
+        while dist <= max_dist:
+            px = center_x + direction_x * dist
+            py = center_y + direction_y * dist
+            if not point_in_polygon((px, py), target_obs["vertices"]):
+                return (px, py)
+            dist += 0.0002  # 每次增加约20米
+        # 如果超出最大距离，返回较远点
+        return (center_x + direction_x * max_dist, center_y + direction_y * max_dist)
     
-    # 按距离起点排序
-    dist_left = math.hypot(left[0]-A[0], left[1]-A[1])
-    dist_right = math.hypot(right[0]-A[0], right[1]-A[1])
+    # 两个外侧方向（垂直方向的正反向）
+    left_point = get_outside_point(perp_x, perp_y)
+    right_point = get_outside_point(-perp_x, -perp_y)
+    
+    # 按距离起点排序，确保航线顺序合理
+    dist_left = math.hypot(left_point[0]-A[0], left_point[1]-A[1])
+    dist_right = math.hypot(right_point[0]-A[0], right_point[1]-A[1])
     if dist_left < dist_right:
-        return [A, left, right, B]
+        return [A, left_point, right_point, B]
     else:
-        return [A, right, left, B]
+        return [A, right_point, left_point, B]
 
 # ========== Streamlit 页面配置 ==========
 st.set_page_config(page_title="无人机地面站监控系统", layout="wide")
