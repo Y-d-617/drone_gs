@@ -6,6 +6,31 @@ from folium.plugins import Draw
 from streamlit_folium import st_folium
 from heartbeat_sim import HeartbeatSimulator
 import math
+import json
+import os
+
+# ========== 障碍物持久化文件路径 ==========
+OBSTACLE_FILE = "obstacles.json"
+
+def save_obstacles_to_file(obstacles):
+    """将障碍物保存到 JSON 文件"""
+    try:
+        with open(OBSTACLE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(obstacles, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        st.error(f"保存障碍物失败: {e}")
+        return False
+
+def load_obstacles_from_file():
+    """从 JSON 文件加载障碍物"""
+    if os.path.exists(OBSTACLE_FILE):
+        try:
+            with open(OBSTACLE_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            st.error(f"加载障碍物失败: {e}")
+    return []
 
 # ========== GCJ-02 转 WGS-84 ==========
 def gcj02_to_wgs84(lng, lat):
@@ -62,7 +87,6 @@ def polygon_intersects_segment(poly_vertices, seg_start, seg_end):
         x2, y2 = poly_vertices[(i+1)%n]
         if segments_intersect(seg_start[0], seg_start[1], seg_end[0], seg_end[1], x1, y1, x2, y2):
             return True
-    # 检查线段中点是否在多边形内部
     mid_x = (seg_start[0] + seg_end[0]) / 2
     mid_y = (seg_start[1] + seg_end[1]) / 2
     inside = False
@@ -80,7 +104,6 @@ def get_bounding_box(poly_vertices):
 
 def generate_detour_route(A, B, obstacles, flight_height):
     """生成绕行航线，确保所有路径点及线段都在障碍物外部"""
-    # 找出第一个需要绕行的障碍物
     target_obs = None
     for obs in obstacles:
         if flight_height < obs["height"] and polygon_intersects_segment(obs["vertices"], A, B):
@@ -89,29 +112,25 @@ def generate_detour_route(A, B, obstacles, flight_height):
     if target_obs is None:
         return [A, B]
 
-    # 获取外接矩形并向外扩展安全距离
     minx, miny, maxx, maxy = get_bounding_box(target_obs["vertices"])
-    expand = 0.0002  # 约20米
+    expand = 0.0002
     minx -= expand
     miny -= expand
     maxx += expand
     maxy += expand
     rect_pts = [(minx, miny), (minx, maxy), (maxx, maxy), (maxx, miny)]
     
-    # 候选绕行路径：使用矩形的两个相邻顶点
     candidate_pairs = [
-        (rect_pts[0], rect_pts[1]),  # 左边
-        (rect_pts[1], rect_pts[2]),  # 上边
-        (rect_pts[2], rect_pts[3]),  # 右边
-        (rect_pts[3], rect_pts[0]),  # 下边
+        (rect_pts[0], rect_pts[1]),
+        (rect_pts[1], rect_pts[2]),
+        (rect_pts[2], rect_pts[3]),
+        (rect_pts[3], rect_pts[0]),
     ]
     for p1, p2 in candidate_pairs:
-        # 检查三段线段是否与障碍物相交
         segs = [(A, p1), (p1, p2), (p2, B)]
         if all(not polygon_intersects_segment(target_obs["vertices"], s[0], s[1]) for s in segs):
             return [A, p1, p2, B]
     
-    # 如果都不行，尝试单点绕行（矩形中心偏移上下）
     mid_top = ((minx+maxx)/2, maxy)
     mid_bottom = ((minx+maxx)/2, miny)
     if not polygon_intersects_segment(target_obs["vertices"], A, mid_top) and not polygon_intersects_segment(target_obs["vertices"], mid_top, B):
@@ -119,26 +138,29 @@ def generate_detour_route(A, B, obstacles, flight_height):
     if not polygon_intersects_segment(target_obs["vertices"], A, mid_bottom) and not polygon_intersects_segment(target_obs["vertices"], mid_bottom, B):
         return [A, mid_bottom, B]
     
-    # 最后回退：直接返回原直线
     return [A, B]
 
 # ========== Streamlit 页面配置 ==========
 st.set_page_config(page_title="无人机地面站监控系统", layout="wide")
 
 # 初始化 session_state
-if "app_version" not in st.session_state or st.session_state.app_version != "v13_final_detour":
+if "app_version" not in st.session_state or st.session_state.app_version != "v14_persistent":
     st.session_state.sim = HeartbeatSimulator()
     st.session_state.history = []
-    st.session_state.obstacles = []
+    # 尝试从文件加载障碍物
+    loaded_obstacles = load_obstacles_from_file()
+    st.session_state.obstacles = loaded_obstacles if loaded_obstacles else []
     st.session_state.default_obstacle_height = 30.0
     st.session_state.detour_route = None
-    st.session_state.app_version = "v13_final_detour"
+    st.session_state.app_version = "v14_persistent"
 else:
+    # 兼容旧数据：将纯列表转换为带高度的字典
     if st.session_state.obstacles and isinstance(st.session_state.obstacles[0], list):
         new_obstacles = []
         for poly in st.session_state.obstacles:
             new_obstacles.append({"vertices": poly, "height": 30.0})
         st.session_state.obstacles = new_obstacles
+        save_obstacles_to_file(st.session_state.obstacles)
 
 # 侧边栏
 st.sidebar.title("🧭 导航控制")
@@ -172,13 +194,33 @@ if page == "航线规划":
                 )
                 if new_height != obs['height']:
                     obs['height'] = new_height
+                    save_obstacles_to_file(st.session_state.obstacles)
                     st.rerun()
                 if st.button(f"🗑️ 删除障碍物 {idx+1}", key=f"del_{idx}"):
                     st.session_state.obstacles.pop(idx)
+                    save_obstacles_to_file(st.session_state.obstacles)
                     st.session_state.detour_route = None
                     st.rerun()
                 st.caption(f"顶点数: {len(obs['vertices'])}")
+    
     st.sidebar.metric("障碍物总数", len(st.session_state.obstacles))
+    
+    # 持久化控制按钮
+    st.sidebar.divider()
+    col_save1, col_save2 = st.sidebar.columns(2)
+    with col_save1:
+        if st.button("💾 保存障碍物"):
+            if save_obstacles_to_file(st.session_state.obstacles):
+                st.sidebar.success("已保存到文件")
+    with col_save2:
+        if st.button("📂 加载障碍物"):
+            loaded = load_obstacles_from_file()
+            if loaded:
+                st.session_state.obstacles = loaded
+                st.sidebar.success(f"加载了 {len(loaded)} 个障碍物")
+                st.rerun()
+            else:
+                st.sidebar.warning("无备份文件或加载失败")
 
     col1, col2 = st.columns([1, 2])
     with col1:
@@ -217,6 +259,7 @@ if page == "航线规划":
         
         if st.button("清除所有障碍物"):
             st.session_state.obstacles = []
+            save_obstacles_to_file(st.session_state.obstacles)
             st.session_state.detour_route = None
             st.rerun()
 
@@ -266,6 +309,7 @@ if page == "航线规划":
         draw.add_to(m)
         output = st_folium(m, width=800, height=500, returned_objects=["last_active_drawing"])
 
+        # 处理新绘制的图形
         if output and output.get("last_active_drawing"):
             drawing = output["last_active_drawing"]
             geom_type = drawing.get("geometry", {}).get("type")
@@ -277,6 +321,7 @@ if page == "航线规划":
                 if not exists:
                     new_obs = {"vertices": poly_wgs84, "height": st.session_state.default_obstacle_height}
                     st.session_state.obstacles.append(new_obs)
+                    save_obstacles_to_file(st.session_state.obstacles)
                     st.success(f"已添加障碍物（高度 {new_obs['height']} m）")
                     st.rerun()
             elif geom_type == "Rectangle" and coords:
@@ -286,6 +331,7 @@ if page == "航线规划":
                 if not exists:
                     new_obs = {"vertices": rect, "height": st.session_state.default_obstacle_height}
                     st.session_state.obstacles.append(new_obs)
+                    save_obstacles_to_file(st.session_state.obstacles)
                     st.success("已添加矩形障碍物")
                     st.rerun()
 
@@ -293,7 +339,7 @@ if page == "航线规划":
 elif page == "飞行监控":
     st.header("✈️ 飞行监控 (心跳包实时状态)")
     placeholder = st.empty()
-    if st.button("开始接收实时数据", key="btn_monitor_v13"):
+    if st.button("开始接收实时数据", key="btn_monitor_v14"):
         for _ in range(50):
             packet = st.session_state.sim.generate_packet()
             st.session_state.history.append(packet)
