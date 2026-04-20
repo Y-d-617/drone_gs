@@ -35,17 +35,16 @@ if page == "航线规划":
         lon_b = st.number_input("终点 B 经度", value=118.7495, format="%.6f")
         height = st.slider("设定飞行高度 (m)", 0, 100, 50)
         
-        # 坐标纠偏
+        # ========== 修改开始：统一使用原始 WGS-84 坐标 ==========
+        # 不再进行 GCJ-02 纠偏，两种模式显示相同位置
         process_lon_a, process_lat_a = lon_a, lat_a
         process_lon_b, process_lat_b = lon_b, lat_b
         if coord_mode == "GCJ-02":
-            process_lon_a, process_lat_a = wgs84_to_gcj02(lon_a, lat_a)
-            process_lon_b, process_lat_b = wgs84_to_gcj02(lon_b, lat_b)
-            st.success("已启用 GCJ-02 纠偏")
+            st.info("当前模式已禁用坐标纠偏，显示位置与 WGS-84 模式一致")
+        # ========== 修改结束 ==========
 
     with col2:
         # 创建 Folium 地图 (使用高德卫星图底图)
-        # style=6 为卫星图，style=7 为街道图
         m = folium.Map(
             location=[process_lat_a, process_lon_a], 
             zoom_start=17, 
