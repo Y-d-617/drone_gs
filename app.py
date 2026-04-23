@@ -12,22 +12,49 @@ import os
 # ========== 障碍物持久化 ==========
 OBSTACLE_FILE = "obstacles.json"
 
+def validate_obstacles(obstacles):
+    """验证障碍物数据有效性，返回有效障碍物列表"""
+    valid = []
+    for obs in obstacles:
+        if not isinstance(obs, dict):
+            continue
+        vertices = obs.get("vertices", [])
+        if not isinstance(vertices, list) or len(vertices) < 3:
+            continue
+        # 检查顶点是否为有效坐标对
+        valid_vertices = []
+        for v in vertices:
+            if isinstance(v, (list, tuple)) and len(v) == 2:
+                lng, lat = v[0], v[1]
+                if isinstance(lng, (int, float)) and isinstance(lat, (int, float)):
+                    valid_vertices.append((float(lng), float(lat)))
+        if len(valid_vertices) >= 3:
+            height = obs.get("height", 30.0)
+            if isinstance(height, (int, float)):
+                valid.append({"vertices": valid_vertices, "height": float(height)})
+    return valid
+
 def save_obstacles_to_file(obstacles):
     try:
         with open(OBSTACLE_FILE, 'w', encoding='utf-8') as f:
             json.dump(obstacles, f, ensure_ascii=False, indent=2)
         return True
     except Exception as e:
-        st.error(f"保存障碍物失败: {e}")
+        print(f"保存失败: {e}")
         return False
 
 def load_obstacles_from_file():
     if os.path.exists(OBSTACLE_FILE):
         try:
             with open(OBSTACLE_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
+                if isinstance(data, list):
+                    return validate_obstacles(data)
+                else:
+                    return []
         except Exception as e:
-            st.error(f"加载障碍物失败: {e}")
+            print(f"加载失败: {e}")
+            return []
     return []
 
 # ========== GCJ-02 转 WGS-84 ==========
@@ -59,7 +86,7 @@ def gcj02_to_wgs84(lng, lat):
     wgs_lng = lng - dlng
     return wgs_lng, wgs_lat
 
-# ========== 几何辅助函数 ==========
+# ========== 几何辅助函数（带安全保护）==========
 def segments_intersect(x1, y1, x2, y2, x3, y3, x4, y4):
     def cross(ax, ay, bx, by):
         return ax*by - ay*bx
@@ -86,21 +113,26 @@ def point_on_segment(p, a, b):
     return True
 
 def polygon_intersects_segment(poly_vertices, seg_start, seg_end):
-    n = len(poly_vertices)
-    for i in range(n):
-        x1, y1 = poly_vertices[i]
-        x2, y2 = poly_vertices[(i+1)%n]
-        if segments_intersect(seg_start[0], seg_start[1], seg_end[0], seg_end[1], x1, y1, x2, y2):
-            return True
-    mid_x = (seg_start[0] + seg_end[0]) / 2
-    mid_y = (seg_start[1] + seg_end[1]) / 2
-    inside = False
-    for i in range(n):
-        x1, y1 = poly_vertices[i]
-        x2, y2 = poly_vertices[(i+1)%n]
-        if ((y1 > mid_y) != (y2 > mid_y)) and (mid_x < (x2 - x1) * (mid_y - y1) / (y2 - y1) + x1):
-            inside = not inside
-    return inside
+    try:
+        n = len(poly_vertices)
+        if n < 3:
+            return False
+        for i in range(n):
+            x1, y1 = poly_vertices[i]
+            x2, y2 = poly_vertices[(i+1)%n]
+            if segments_intersect(seg_start[0], seg_start[1], seg_end[0], seg_end[1], x1, y1, x2, y2):
+                return True
+        mid_x = (seg_start[0] + seg_end[0]) / 2
+        mid_y = (seg_start[1] + seg_end[1]) / 2
+        inside = False
+        for i in range(n):
+            x1, y1 = poly_vertices[i]
+            x2, y2 = poly_vertices[(i+1)%n]
+            if ((y1 > mid_y) != (y2 > mid_y)) and (mid_x < (x2 - x1) * (mid_y - y1) / (y2 - y1) + x1):
+                inside = not inside
+        return inside
+    except:
+        return False
 
 def get_bounding_box(poly_vertices):
     xs = [v[0] for v in poly_vertices]
@@ -108,21 +140,24 @@ def get_bounding_box(poly_vertices):
     return min(xs), min(ys), max(xs), max(ys)
 
 def line_intersection_point(p1, p2, p3, p4):
-    x1, y1 = p1; x2, y2 = p2; x3, y3 = p3; x4, y4 = p4
-    denom = (x1-x2)*(y3-y4) - (y1-y2)*(x3-x4)
-    if abs(denom) < 1e-12:
+    try:
+        x1, y1 = p1; x2, y2 = p2; x3, y3 = p3; x4, y4 = p4
+        denom = (x1-x2)*(y3-y4) - (y1-y2)*(x3-x4)
+        if abs(denom) < 1e-12:
+            return None
+        t = ((x1-x3)*(y3-y4) - (y1-y3)*(x3-x4)) / denom
+        u = -((x1-x2)*(y1-y3) - (y1-y2)*(x1-x3)) / denom
+        if 0 <= t <= 1 and 0 <= u <= 1:
+            x = x1 + t*(x2-x1)
+            y = y1 + t*(y2-y1)
+            return (x, y)
         return None
-    t = ((x1-x3)*(y3-y4) - (y1-y3)*(x3-x4)) / denom
-    u = -((x1-x2)*(y1-y3) - (y1-y2)*(x1-x3)) / denom
-    if 0 <= t <= 1 and 0 <= u <= 1:
-        x = x1 + t*(x2-x1)
-        y = y1 + t*(y2-y1)
-        return (x, y)
-    return None
+    except:
+        return None
 
-# ========== 最短路径与平滑曲线 ==========
+# ========== 最短路径与平滑曲线（安全版本）==========
 def catmull_rom_spline(points, num_segments=30):
-    if len(points) < 2:
+    if not points or len(points) < 2:
         return points
     if len(points) == 2:
         return [points[0] + (points[1]-points[0]) * t for t in [i/num_segments for i in range(num_segments+1)]]
@@ -146,6 +181,7 @@ def catmull_rom_spline(points, num_segments=30):
     return result
 
 def shortest_rectangle_path(A, B, rect_pts, safety_meters):
+    # 构建矩形的四条边
     edges = [
         (rect_pts[0], rect_pts[1]),
         (rect_pts[1], rect_pts[2]),
@@ -163,7 +199,9 @@ def shortest_rectangle_path(A, B, rect_pts, safety_meters):
         maxx, maxy = rect_pts[2][0], rect_pts[2][1]
         mid_top = ((minx+maxx)/2, maxy)
         mid_bottom = ((minx+maxx)/2, miny)
-        return [A, mid_top, B] if math.hypot(mid_top[0]-A[0], mid_top[1]-A[1]) < math.hypot(mid_bottom[0]-A[0], mid_bottom[1]-A[1]) else [A, mid_bottom, B]
+        dist_top = math.hypot(mid_top[0]-A[0], mid_top[1]-A[1]) + math.hypot(mid_top[0]-B[0], mid_top[1]-B[1])
+        dist_bottom = math.hypot(mid_bottom[0]-A[0], mid_bottom[1]-A[1]) + math.hypot(mid_bottom[0]-B[0], mid_bottom[1]-B[1])
+        return [A, mid_top, B] if dist_top <= dist_bottom else [A, mid_bottom, B]
     intersections.sort(key=lambda p: math.hypot(p[0]-A[0], p[1]-A[1]))
     p_enter, p_exit = intersections[0], intersections[1]
 
@@ -213,21 +251,26 @@ def shortest_rectangle_path(A, B, rect_pts, safety_meters):
         return [A] + path_ccw + [B]
 
 def detour_around_obstacle(A, B, obs, safety_meters):
-    minx, miny, maxx, maxy = get_bounding_box(obs["vertices"])
-    expand_deg = safety_meters / 111000.0
-    minx -= expand_deg
-    miny -= expand_deg
-    maxx += expand_deg
-    maxy += expand_deg
-    rect_pts = [(minx, miny), (minx, maxy), (maxx, maxy), (maxx, miny)]
-    control_points = shortest_rectangle_path(A, B, rect_pts, safety_meters)
-    if len(control_points) > 2:
-        smooth = catmull_rom_spline(control_points, num_segments=25)
-        return smooth
-    else:
-        return control_points
+    try:
+        minx, miny, maxx, maxy = get_bounding_box(obs["vertices"])
+        expand_deg = safety_meters / 111000.0
+        minx -= expand_deg
+        miny -= expand_deg
+        maxx += expand_deg
+        maxy += expand_deg
+        rect_pts = [(minx, miny), (minx, maxy), (maxx, maxy), (maxx, miny)]
+        control_points = shortest_rectangle_path(A, B, rect_pts, safety_meters)
+        if len(control_points) > 2:
+            smooth = catmull_rom_spline(control_points, num_segments=25)
+            return smooth
+        else:
+            return control_points
+    except:
+        return [A, B]
 
-def generate_detour_route(A, B, obstacles, flight_height, safety_meters, max_iter=10):
+def generate_detour_route(A, B, obstacles, flight_height, safety_meters, max_iter=8):
+    if not obstacles:
+        return [A, B]
     current_route = [A, B]
     for _ in range(max_iter):
         new_route = [current_route[0]]
@@ -254,7 +297,8 @@ def generate_detour_route(A, B, obstacles, flight_height, safety_meters, max_ite
 # ========== Streamlit 页面配置 ==========
 st.set_page_config(page_title="无人机地面站监控系统", layout="wide")
 
-if "app_version" not in st.session_state or st.session_state.app_version != "v17_shortest_smooth":
+# 初始化 session_state
+if "app_version" not in st.session_state or st.session_state.app_version != "v18_stable":
     st.session_state.sim = HeartbeatSimulator()
     st.session_state.history = []
     loaded = load_obstacles_from_file()
@@ -262,14 +306,11 @@ if "app_version" not in st.session_state or st.session_state.app_version != "v17
     st.session_state.default_obstacle_height = 30.0
     st.session_state.safety_distance = 3.0
     st.session_state.detour_route = None
-    st.session_state.app_version = "v17_shortest_smooth"
+    st.session_state.app_version = "v18_stable"
 else:
-    if st.session_state.obstacles and isinstance(st.session_state.obstacles[0], list):
-        new_obs = []
-        for poly in st.session_state.obstacles:
-            new_obs.append({"vertices": poly, "height": 30.0})
-        st.session_state.obstacles = new_obs
-        save_obstacles_to_file(st.session_state.obstacles)
+    # 确保每次启动时验证并清理障碍物数据
+    if st.session_state.obstacles:
+        st.session_state.obstacles = validate_obstacles(st.session_state.obstacles)
 
 st.sidebar.title("🧭 导航控制")
 page = st.sidebar.radio("请选择功能页面", ["航线规划", "飞行监控"])
@@ -278,7 +319,7 @@ coord_mode = st.sidebar.radio("坐标系设置（输入坐标的原始类型）"
 st.sidebar.info("✅ 卫星图底图：Esri World Imagery (WGS-84)\n若选择 GCJ-02，系统会自动转换为 WGS-84 匹配卫星图。")
 
 if page == "航线规划":
-    st.header("🗺️ 航线规划 + 障碍物圈选 (最短平滑绕行)")
+    st.header("🗺️ 航线规划 + 障碍物圈选 (稳定版)")
 
     st.sidebar.subheader("🚧 障碍物默认高度")
     default_h = st.sidebar.number_input(
@@ -335,7 +376,14 @@ if page == "航线规划":
                 st.sidebar.success(f"加载 {len(loaded)} 个")
                 st.rerun()
             else:
-                st.sidebar.warning("无备份文件")
+                st.sidebar.warning("无备份文件或文件损坏")
+    if st.sidebar.button("🧹 清空所有障碍物并重置文件"):
+        st.session_state.obstacles = []
+        if os.path.exists(OBSTACLE_FILE):
+            os.remove(OBSTACLE_FILE)
+        st.session_state.detour_route = None
+        st.sidebar.success("已清空障碍物")
+        st.rerun()
 
     col1, col2 = st.columns([1, 2])
     with col1:
@@ -452,7 +500,7 @@ if page == "航线规划":
 elif page == "飞行监控":
     st.header("✈️ 飞行监控 (心跳包实时状态)")
     placeholder = st.empty()
-    if st.button("开始接收实时数据", key="btn_monitor_v17"):
+    if st.button("开始接收实时数据", key="btn_monitor_v18"):
         for _ in range(50):
             packet = st.session_state.sim.generate_packet()
             st.session_state.history.append(packet)
