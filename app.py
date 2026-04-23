@@ -8,12 +8,13 @@ from heartbeat_sim import HeartbeatSimulator
 import math
 import json
 import os
+import sys
 
 # ========== 障碍物持久化 ==========
 OBSTACLE_FILE = "obstacles.json"
 
 def validate_obstacles(obstacles):
-    """验证障碍物数据，转换为统一格式 {vertices, height, center, radius}"""
+    """验证障碍物数据有效性，返回有效障碍物列表"""
     valid = []
     for obs in obstacles:
         if not isinstance(obs, dict):
@@ -24,42 +25,22 @@ def validate_obstacles(obstacles):
         valid_vertices = []
         for v in vertices:
             if isinstance(v, (list, tuple)) and len(v) == 2:
-                try:
-                    lng, lat = float(v[0]), float(v[1])
-                    valid_vertices.append((lng, lat))
-                except:
-                    pass
-        if len(valid_vertices) < 3:
-            continue
-        height = obs.get("height", 30.0)
-        try:
-            height = float(height)
-        except:
-            height = 30.0
-        # 计算外接圆圆心和半径
-        xs = [p[0] for p in valid_vertices]
-        ys = [p[1] for p in valid_vertices]
-        cx = (min(xs) + max(xs)) / 2
-        cy = (min(ys) + max(ys)) / 2
-        radius = max(max(xs)-cx, cx-min(xs), max(ys)-cy, cy-min(ys))  # 半边长
-        valid.append({
-            "vertices": valid_vertices,
-            "height": height,
-            "center": (cx, cy),
-            "radius": radius
-        })
+                lng, lat = v[0], v[1]
+                if isinstance(lng, (int, float)) and isinstance(lat, (int, float)):
+                    valid_vertices.append((float(lng), float(lat)))
+        if len(valid_vertices) >= 3:
+            height = obs.get("height", 30.0)
+            if isinstance(height, (int, float)):
+                valid.append({"vertices": valid_vertices, "height": float(height)})
     return valid
 
 def save_obstacles_to_file(obstacles):
-    # 保存前需要移除计算字段，只保存原始顶点和高度
-    to_save = []
-    for obs in obstacles:
-        to_save.append({"vertices": obs["vertices"], "height": obs["height"]})
     try:
         with open(OBSTACLE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(to_save, f, ensure_ascii=False, indent=2)
+            json.dump(obstacles, f, ensure_ascii=False, indent=2)
         return True
-    except:
+    except Exception as e:
+        print(f"保存失败: {e}")
         return False
 
 def load_obstacles_from_file():
@@ -69,8 +50,11 @@ def load_obstacles_from_file():
                 data = json.load(f)
                 if isinstance(data, list):
                     return validate_obstacles(data)
-        except:
-            pass
+                else:
+                    return []
+        except Exception as e:
+            print(f"加载失败: {e}")
+            return []
     return []
 
 # ========== GCJ-02 转 WGS-84 ==========
@@ -102,142 +86,90 @@ def gcj02_to_wgs84(lng, lat):
     wgs_lng = lng - dlng
     return wgs_lng, wgs_lat
 
-# ========== 圆形绕行算法（稳定）==========
-def circle_line_intersection(center, radius, A, B):
-    """返回线段AB与圆的交点（从A到B方向，最多两个），若不相交返回空列表"""
-    cx, cy = center
-    ax, ay = A
-    bx, by = B
-    dx = bx - ax
-    dy = by - ay
-    fx = ax - cx
-    fy = ay - cy
-    a = dx*dx + dy*dy
-    if a < 1e-12:
-        return []
-    b = 2*(fx*dx + fy*dy)
-    c = (fx*fx + fy*fy) - radius*radius
-    delta = b*b - 4*a*c
-    if delta < 0:
-        return []
-    sqrt_delta = math.sqrt(delta)
-    t1 = (-b - sqrt_delta) / (2*a)
-    t2 = (-b + sqrt_delta) / (2*a)
-    intersections = []
-    for t in (t1, t2):
-        if 0 <= t <= 1:
-            x = ax + t*dx
-            y = ay + t*dy
-            intersections.append((x, y))
-    # 按距离A排序
-    intersections.sort(key=lambda p: math.hypot(p[0]-ax, p[1]-ay))
-    return intersections
+# ========== 几何辅助函数（带安全保护）==========
+def segments_intersect(x1, y1, x2, y2, x3, y3, x4, y4):
+    def cross(ax, ay, bx, by):
+        return ax*by - ay*bx
+    def on_segment(px, py, qx, qy, rx, ry):
+        return min(px, qx) <= rx <= max(px, qx) and min(py, qy) <= ry <= max(py, qy)
+    o1 = cross(x2-x1, y2-y1, x3-x1, y3-y1)
+    o2 = cross(x2-x1, y2-y1, x4-x1, y4-y1)
+    o3 = cross(x4-x3, y4-y3, x1-x3, y1-y3)
+    o4 = cross(x4-x3, y4-y3, x2-x3, y2-y3)
+    if o1 == 0 and on_segment(x1, y1, x2, y2, x3, y3): return True
+    if o2 == 0 and on_segment(x1, y1, x2, y2, x4, y4): return True
+    if o3 == 0 and on_segment(x3, y3, x4, y4, x1, y1): return True
+    if o4 == 0 and on_segment(x3, y3, x4, y4, x2, y2): return True
+    return (o1 > 0) != (o2 > 0) and (o3 > 0) != (o4 > 0)
 
-def get_tangent_points(center, radius, point):
-    """从圆外一点到圆的两条切线切点（返回两个点）"""
-    cx, cy = center
-    px, py = point
-    dx = px - cx
-    dy = py - cy
-    dist = math.hypot(dx, dy)
-    if dist <= radius:
-        return []  # 点在圆内或圆上，无法作切线
-    angle = math.atan2(dy, dx)
-    delta = math.asin(radius / dist)
-    angle1 = angle + delta
-    angle2 = angle - delta
-    t1 = (cx + radius * math.cos(angle1), cy + radius * math.sin(angle1))
-    t2 = (cx + radius * math.cos(angle2), cy + radius * math.sin(angle2))
-    return [t1, t2]
+def point_on_segment(p, a, b):
+    x, y = p; x1, y1 = a; x2, y2 = b
+    cross = (x - x1)*(y2 - y1) - (y - y1)*(x2 - x1)
+    if abs(cross) > 1e-9:
+        return False
+    dot = (x - x1)*(x2 - x1) + (y - y1)*(y2 - y1)
+    if dot < 0 or dot > (x2-x1)*(x2-x1) + (y2-y1)*(y2-y1):
+        return False
+    return True
 
-def generate_detour_route(A, B, obstacles, flight_height, safety_meters):
-    """基于圆形近似生成绕行航线，确保平滑且稳定"""
-    # 筛选需要绕行的障碍物（高度低于飞行高度且与线段相交）
-    relevant = []
-    for obs in obstacles:
-        if flight_height < obs["height"]:
-            # 扩大半径作为安全距离
-            expanded_radius = obs["radius"] + safety_meters / 111000.0
-            inters = circle_line_intersection(obs["center"], expanded_radius, A, B)
-            if inters:
-                relevant.append((obs, inters, expanded_radius))
-    if not relevant:
-        return [A, B]
-    # 按交点距离A排序，先处理第一个
-    relevant.sort(key=lambda x: math.hypot(x[1][0][0]-A[0], x[1][0][1]-A[1]))
-    # 迭代处理：对第一个障碍物生成绕行路径，然后递归处理后续段
-    def detour_single(A, B, obs, inters, radius):
-        # 取第一个交点和最后一个交点
-        p_in = inters[0]
-        p_out = inters[-1] if len(inters) > 1 else inters[0]
-        # 计算从A到p_in的路径（直接直线，但为了平滑，可能添加切线点？）
-        # 更优雅：从A到圆上入切点，然后沿圆弧到出切点，再到B
-        # 简化：找到从A到圆的两条切线，选择与p_in最近的那个切点作为入口
-        tangents = get_tangent_points(obs["center"], radius, A)
-        if not tangents:
-            # 如果A在圆内，直接取p_in作为入口
-            entry = p_in
-        else:
-            # 选择离p_in最近的切点作为入口
-            entry = min(tangents, key=lambda t: math.hypot(t[0]-p_in[0], t[1]-p_in[1]))
-        tangents2 = get_tangent_points(obs["center"], radius, B)
-        if not tangents2:
-            exit = p_out
-        else:
-            exit = min(tangents2, key=lambda t: math.hypot(t[0]-p_out[0], t[1]-p_out[1]))
-        # 控制点序列：A -> entry -> exit -> B
-        control = [A, entry, exit, B]
-        # 插值平滑
-        return catmull_rom_spline(control, num_segments=30)
+def polygon_intersects_segment(poly_vertices, seg_start, seg_end):
+    try:
+        n = len(poly_vertices)
+        if n < 3:
+            return False
+        for i in range(n):
+            x1, y1 = poly_vertices[i]
+            x2, y2 = poly_vertices[(i+1)%n]
+            if segments_intersect(seg_start[0], seg_start[1], seg_end[0], seg_end[1], x1, y1, x2, y2):
+                return True
+        mid_x = (seg_start[0] + seg_end[0]) / 2
+        mid_y = (seg_start[1] + seg_end[1]) / 2
+        inside = False
+        for i in range(n):
+            x1, y1 = poly_vertices[i]
+            x2, y2 = poly_vertices[(i+1)%n]
+            if ((y1 > mid_y) != (y2 > mid_y)) and (mid_x < (x2 - x1) * (mid_y - y1) / (y2 - y1) + x1):
+                inside = not inside
+        return inside
+    except:
+        return False
 
-    # 处理第一个障碍物
-    first_obs, first_inters, first_radius = relevant[0]
-    # 生成绕行该障碍物的路径（可能为平滑曲线点集）
-    detour_path = detour_single(A, B, first_obs, first_inters, first_radius)
-    # 递归处理剩余障碍物：将detour_path作为新航线，再次检查冲突
-    # 为了避免无限递归，只迭代两次
-    current_route = detour_path
-    for _ in range(5):
-        new_route = [current_route[0]]
-        conflict = False
-        for i in range(len(current_route)-1):
-            seg_start = current_route[i]
-            seg_end = current_route[i+1]
-            # 检查本段是否与任何障碍物相交
-            found = None
-            for obs in obstacles:
-                if flight_height < obs["height"]:
-                    radius = obs["radius"] + safety_meters / 111000.0
-                    inters = circle_line_intersection(obs["center"], radius, seg_start, seg_end)
-                    if inters:
-                        found = obs
-                        break
-            if found is None:
-                new_route.append(seg_end)
-            else:
-                conflict = True
-                # 对这一段重新绕行
-                radius = found["radius"] + safety_meters / 111000.0
-                inters = circle_line_intersection(found["center"], radius, seg_start, seg_end)
-                if inters:
-                    # 简单绕行：添加两个切线点
-                    tangents = get_tangent_points(found["center"], radius, seg_start)
-                    tangents2 = get_tangent_points(found["center"], radius, seg_end)
-                    if tangents and tangents2:
-                        p1 = tangents[0] if len(tangents)>0 else inters[0]
-                        p2 = tangents2[0] if len(tangents2)>0 else inters[-1]
-                        sub = [seg_start, p1, p2, seg_end]
-                        sub_smooth = catmull_rom_spline(sub, num_segments=20)
-                        new_route.extend(sub_smooth[1:])
-                    else:
-                        new_route.append(seg_end)
-                else:
-                    new_route.append(seg_end)
-        if not conflict:
-            return current_route
-        current_route = new_route
-    return current_route
+def get_bounding_box(poly_vertices):
+    xs = [v[0] for v in poly_vertices]
+    ys = [v[1] for v in poly_vertices]
+    return min(xs), min(ys), max(xs), max(ys)
 
+def line_intersection_point(p1, p2, p3, p4):
+    try:
+        x1, y1 = p1; x2, y2 = p2; x3, y3 = p3; x4, y4 = p4
+        denom = (x1-x2)*(y3-y4) - (y1-y2)*(x3-x4)
+        if abs(denom) < 1e-12:
+            return None
+        t = ((x1-x3)*(y3-y4) - (y1-y3)*(x3-x4)) / denom
+        u = -((x1-x2)*(y1-y3) - (y1-y2)*(x1-x3)) / denom
+        if 0 <= t <= 1 and 0 <= u <= 1:
+            x = x1 + t*(x2-x1)
+            y = y1 + t*(y2-y1)
+            return (x, y)
+        return None
+    except:
+        return None
+
+def path_intersects_any_obstacle(path_points, obstacles, flight_height=None):
+    """检查一条折线（点列表）是否与任何障碍物相交（忽略高度条件，因为绕行时只考虑高度低于飞行高度的障碍物）"""
+    if not obstacles or len(path_points) < 2:
+        return False
+    for i in range(len(path_points)-1):
+        seg_start = path_points[i]
+        seg_end = path_points[i+1]
+        for obs in obstacles:
+            if flight_height is not None and flight_height >= obs["height"]:
+                continue
+            if polygon_intersects_segment(obs["vertices"], seg_start, seg_end):
+                return True
+    return False
+
+# ========== 最短路径与平滑曲线（增强版）==========
 def catmull_rom_spline(points, num_segments=30):
     if not points or len(points) < 2:
         return points
@@ -262,10 +194,157 @@ def catmull_rom_spline(points, num_segments=30):
     result.append(points[-1])
     return result
 
+def shortest_rectangle_path(A, B, rect_pts, safety_meters):
+    edges = [
+        (rect_pts[0], rect_pts[1]),
+        (rect_pts[1], rect_pts[2]),
+        (rect_pts[2], rect_pts[3]),
+        (rect_pts[3], rect_pts[0])
+    ]
+    intersections = []
+    for e in edges:
+        inter = line_intersection_point(A, B, e[0], e[1])
+        if inter:
+            if not any(math.hypot(inter[0]-p[0], inter[1]-p[1]) < 1e-9 for p in intersections):
+                intersections.append(inter)
+    if len(intersections) < 2:
+        minx, miny = rect_pts[0][0], rect_pts[0][1]
+        maxx, maxy = rect_pts[2][0], rect_pts[2][1]
+        mid_top = ((minx+maxx)/2, maxy)
+        mid_bottom = ((minx+maxx)/2, miny)
+        dist_top = math.hypot(mid_top[0]-A[0], mid_top[1]-A[1]) + math.hypot(mid_top[0]-B[0], mid_top[1]-B[1])
+        dist_bottom = math.hypot(mid_bottom[0]-A[0], mid_bottom[1]-A[1]) + math.hypot(mid_bottom[0]-B[0], mid_bottom[1]-B[1])
+        return [A, mid_top, B] if dist_top <= dist_bottom else [A, mid_bottom, B]
+    intersections.sort(key=lambda p: math.hypot(p[0]-A[0], p[1]-A[1]))
+    p_enter, p_exit = intersections[0], intersections[1]
+
+    def edge_index(pt):
+        for i, e in enumerate(edges):
+            if point_on_segment(pt, e[0], e[1]):
+                return i
+        return -1
+    enter_idx = edge_index(p_enter)
+    exit_idx = edge_index(p_exit)
+    if enter_idx == -1 or exit_idx == -1:
+        return [A, p_enter, p_exit, B]
+
+    def build_path(start_pt, start_idx, end_pt, end_idx, direction=1):
+        path = [start_pt]
+        idx = start_idx
+        while True:
+            next_idx = (idx + direction) % len(edges)
+            if direction == 1:
+                next_pt = edges[idx][1]
+            else:
+                next_pt = edges[idx][0]
+            if idx == end_idx:
+                path.append(end_pt)
+                break
+            else:
+                path.append(next_pt)
+            idx = next_idx
+            if idx == start_idx:
+                break
+        return path
+
+    path_cw = build_path(p_enter, enter_idx, p_exit, exit_idx, 1)
+    path_ccw = build_path(p_enter, enter_idx, p_exit, exit_idx, -1)
+
+    def total_length(path):
+        total = math.hypot(path[0][0]-A[0], path[0][1]-A[1])
+        for i in range(len(path)-1):
+            total += math.hypot(path[i+1][0]-path[i][0], path[i+1][1]-path[i][1])
+        total += math.hypot(B[0]-path[-1][0], B[1]-path[-1][1])
+        return total
+
+    if total_length(path_cw) <= total_length(path_ccw):
+        return [A] + path_cw + [B]
+    else:
+        return [A] + path_ccw + [B]
+
+def detour_around_obstacle(A, B, obs, safety_meters):
+    """生成绕行单个障碍物的路径（优先平滑曲线，若相交则回退到折线）"""
+    try:
+        minx, miny, maxx, maxy = get_bounding_box(obs["vertices"])
+        expand_deg = safety_meters / 111000.0
+        # 增加一个小的额外偏移避免边缘重合
+        expand_deg += 1e-6
+        minx -= expand_deg
+        miny -= expand_deg
+        maxx += expand_deg
+        maxy += expand_deg
+        rect_pts = [(minx, miny), (minx, maxy), (maxx, maxy), (maxx, miny)]
+        control_points = shortest_rectangle_path(A, B, rect_pts, safety_meters)
+        if len(control_points) <= 2:
+            return control_points
+        # 先尝试平滑曲线
+        smooth = catmull_rom_spline(control_points, num_segments=30)
+        # 检查平滑曲线是否与当前障碍物相交
+        if not path_intersects_any_obstacle(smooth, [obs]):
+            return smooth
+        else:
+            # 回退到折线（控制点连线）
+            # 进一步检查折线是否相交，若仍相交则增加安全距离再试
+            if not path_intersects_any_obstacle(control_points, [obs]):
+                return control_points
+            else:
+                # 再增加30%安全距离重试
+                expand_deg2 = (safety_meters * 1.3) / 111000.0
+                minx2, miny2, maxx2, maxy2 = get_bounding_box(obs["vertices"])
+                minx2 -= expand_deg2
+                miny2 -= expand_deg2
+                maxx2 += expand_deg2
+                maxy2 += expand_deg2
+                rect_pts2 = [(minx2, miny2), (minx2, maxy2), (maxx2, maxy2), (maxx2, miny2)]
+                control_points2 = shortest_rectangle_path(A, B, rect_pts2, safety_meters*1.3)
+                return control_points2
+    except Exception as e:
+        print(f"绕行失败: {e}")
+        return [A, B]
+
+def generate_detour_route(A, B, obstacles, flight_height, safety_meters, max_iter=10):
+    """迭代处理多个障碍物，确保最终路径不与任何障碍物相交"""
+    if not obstacles:
+        return [A, B]
+    current_route = [A, B]
+    for iteration in range(max_iter):
+        # 检查当前路径是否与任何障碍物相交
+        if not path_intersects_any_obstacle(current_route, obstacles, flight_height):
+            return current_route
+        # 否则，找到第一个相交的段进行绕行
+        new_route = [current_route[0]]
+        conflict_fixed = False
+        for i in range(len(current_route)-1):
+            seg_start = current_route[i]
+            seg_end = current_route[i+1]
+            # 查找与该段相交的障碍物（取第一个）
+            target_obs = None
+            for obs in obstacles:
+                if flight_height < obs["height"] and polygon_intersects_segment(obs["vertices"], seg_start, seg_end):
+                    target_obs = obs
+                    break
+            if target_obs is None:
+                new_route.append(seg_end)
+            else:
+                conflict_fixed = True
+                detour_seg = detour_around_obstacle(seg_start, seg_end, target_obs, safety_meters)
+                # 避免重复添加起点
+                new_route.extend(detour_seg[1:])
+        if not conflict_fixed:
+            # 没有发现冲突但整体路径仍有冲突？可能因为多个障碍物同时作用，继续迭代
+            current_route = new_route
+            continue
+        current_route = new_route
+    # 最后再检查一次，如果仍有冲突，返回原始直线（避免崩溃）
+    if path_intersects_any_obstacle(current_route, obstacles, flight_height):
+        return [A, B]
+    return current_route
+
 # ========== Streamlit 页面配置 ==========
 st.set_page_config(page_title="无人机地面站监控系统", layout="wide")
 
-if "app_version" not in st.session_state or st.session_state.app_version != "v19_circle_detour":
+# 初始化 session_state
+if "app_version" not in st.session_state or st.session_state.app_version != "v19_final":
     st.session_state.sim = HeartbeatSimulator()
     st.session_state.history = []
     loaded = load_obstacles_from_file()
@@ -273,12 +352,10 @@ if "app_version" not in st.session_state or st.session_state.app_version != "v19
     st.session_state.default_obstacle_height = 30.0
     st.session_state.safety_distance = 3.0
     st.session_state.detour_route = None
-    st.session_state.app_version = "v19_circle_detour"
+    st.session_state.app_version = "v19_final"
 else:
     if st.session_state.obstacles:
-        # 确保障碍物包含计算字段（如果从旧版加载可能缺失，重新验证）
-        if "center" not in st.session_state.obstacles[0]:
-            st.session_state.obstacles = validate_obstacles(st.session_state.obstacles)
+        st.session_state.obstacles = validate_obstacles(st.session_state.obstacles)
 
 st.sidebar.title("🧭 导航控制")
 page = st.sidebar.radio("请选择功能页面", ["航线规划", "飞行监控"])
@@ -287,7 +364,7 @@ coord_mode = st.sidebar.radio("坐标系设置（输入坐标的原始类型）"
 st.sidebar.info("✅ 卫星图底图：Esri World Imagery (WGS-84)\n若选择 GCJ-02，系统会自动转换为 WGS-84 匹配卫星图。")
 
 if page == "航线规划":
-    st.header("🗺️ 航线规划 + 障碍物圈选 (稳定圆形绕行)")
+    st.header("🗺️ 航线规划 + 障碍物圈选 (完全避障版)")
 
     st.sidebar.subheader("🚧 障碍物默认高度")
     default_h = st.sidebar.number_input(
@@ -303,7 +380,7 @@ if page == "航线规划":
         "绕行安全距离", 
         min_value=0.0, max_value=200.0, 
         value=st.session_state.safety_distance, step=5.0,
-        help="绕行路径与障碍物的最小距离"
+        help="绕行路径与障碍物的最小距离（若仍有重合会自动增加）"
     )
     st.session_state.safety_distance = safety
     st.sidebar.divider()
@@ -352,6 +429,14 @@ if page == "航线规划":
         st.session_state.detour_route = None
         st.sidebar.success("已清空障碍物")
         st.rerun()
+    if st.sidebar.button("🔄 重置应用（清空所有数据）"):
+        st.session_state.obstacles = []
+        if os.path.exists(OBSTACLE_FILE):
+            os.remove(OBSTACLE_FILE)
+        st.session_state.detour_route = None
+        st.session_state.history = []
+        st.session_state.sim = HeartbeatSimulator()
+        st.rerun()
 
     col1, col2 = st.columns([1, 2])
     with col1:
@@ -371,26 +456,27 @@ if page == "航线规划":
             display_lon_b, display_lat_b = lon_b, lat_b
             st.info("直接使用 WGS-84 坐标")
 
-        if st.button("✈️ 生成绕行航线"):
-            with st.spinner("正在计算绕行路径..."):
+        if st.button("✈️ 生成完全避障绕行航线"):
+            with st.spinner("正在计算最优绕行路径..."):
                 A_wgs = (display_lon_a, display_lat_a)
                 B_wgs = (display_lon_b, display_lat_b)
-                try:
-                    detour = generate_detour_route(
-                        A_wgs, B_wgs, 
-                        st.session_state.obstacles, 
-                        flight_height,
-                        st.session_state.safety_distance
-                    )
-                    if len(detour) == 2:
-                        st.success("✅ 无冲突，无需绕行")
-                        st.session_state.detour_route = None
-                    else:
-                        st.success(f"✅ 已生成绕行航线，共 {len(detour)} 个航点")
-                        st.session_state.detour_route = detour
-                except Exception as e:
-                    st.error(f"计算失败: {e}")
+                detour = generate_detour_route(
+                    A_wgs, B_wgs, 
+                    st.session_state.obstacles, 
+                    flight_height,
+                    st.session_state.safety_distance
+                )
+                if len(detour) == 2:
+                    st.success("✅ 无冲突，无需绕行")
                     st.session_state.detour_route = None
+                else:
+                    # 最终验证
+                    if not path_intersects_any_obstacle(detour, st.session_state.obstacles, flight_height):
+                        st.success(f"✅ 已生成完全避障航线，共 {len(detour)} 个航点")
+                        st.session_state.detour_route = detour
+                    else:
+                        st.error("⚠️ 无法生成完全避障航线，请增加安全距离或减少障碍物")
+                        st.session_state.detour_route = None
                 st.rerun()
 
         if st.button("清除绕行航线"):
@@ -420,7 +506,7 @@ if page == "航线规划":
             detour_locs = [[lat, lng] for lng, lat in st.session_state.detour_route]
             folium.PolyLine(
                 locations=detour_locs, color="blue", weight=4, opacity=0.9,
-                popup="绕行航线"
+                popup="完全避障绕行航线"
             ).add_to(m)
             start_pt = st.session_state.detour_route[0]
             end_pt = st.session_state.detour_route[-1]
@@ -431,14 +517,11 @@ if page == "航线规划":
         folium.Marker([display_lat_b, display_lon_b], popup="终点 B", icon=folium.Icon(color='green', icon='stop')).add_to(m)
 
         for idx, obs in enumerate(st.session_state.obstacles):
-            # 显示多边形（原始障碍物形状）
             poly_folium = [[lat, lng] for lng, lat in obs["vertices"]]
             folium.Polygon(
                 locations=poly_folium, color="red", weight=3, fill=True, fill_color="red", fill_opacity=0.3,
                 popup=f"障碍物 {idx+1}\n高度: {obs['height']} m"
             ).add_to(m)
-            # 可选：显示外接圆（调试用，这里注释掉）
-            # folium.Circle(radius=obs["radius"]*111000, location=[obs["center"][1], obs["center"][0]], color='gray', fill=False).add_to(m)
 
         draw = Draw(
             draw_options={"polyline": False, "rectangle": True, "circle": False, "marker": False, "circlemarker": False, "polygon": True},
@@ -457,25 +540,20 @@ if page == "航线规划":
                 exists = any(obs["vertices"] == poly_wgs84 for obs in st.session_state.obstacles)
                 if not exists:
                     new_obs = {"vertices": poly_wgs84, "height": st.session_state.default_obstacle_height}
-                    # 重新验证以添加 center/radius
-                    validated = validate_obstacles([new_obs])
-                    if validated:
-                        st.session_state.obstacles.append(validated[0])
-                        save_obstacles_to_file(st.session_state.obstacles)
-                        st.success(f"已添加障碍物（高度 {new_obs['height']} m）")
-                        st.rerun()
+                    st.session_state.obstacles.append(new_obs)
+                    save_obstacles_to_file(st.session_state.obstacles)
+                    st.success(f"已添加障碍物（高度 {new_obs['height']} m）")
+                    st.rerun()
             elif geom_type == "Rectangle" and coords:
                 lng1, lat1 = coords[0]; lng2, lat2 = coords[1]
                 rect = [(lng1, lat1), (lng2, lat1), (lng2, lat2), (lng1, lat2)]
                 exists = any(obs["vertices"] == rect for obs in st.session_state.obstacles)
                 if not exists:
                     new_obs = {"vertices": rect, "height": st.session_state.default_obstacle_height}
-                    validated = validate_obstacles([new_obs])
-                    if validated:
-                        st.session_state.obstacles.append(validated[0])
-                        save_obstacles_to_file(st.session_state.obstacles)
-                        st.success("已添加矩形障碍物")
-                        st.rerun()
+                    st.session_state.obstacles.append(new_obs)
+                    save_obstacles_to_file(st.session_state.obstacles)
+                    st.success("已添加矩形障碍物")
+                    st.rerun()
 
 elif page == "飞行监控":
     st.header("✈️ 飞行监控 (心跳包实时状态)")
