@@ -13,7 +13,6 @@ import os
 OBSTACLE_FILE = "obstacles.json"
 
 def save_obstacles_to_file(obstacles):
-    """将障碍物保存到 JSON 文件"""
     try:
         with open(OBSTACLE_FILE, 'w', encoding='utf-8') as f:
             json.dump(obstacles, f, ensure_ascii=False, indent=2)
@@ -23,7 +22,6 @@ def save_obstacles_to_file(obstacles):
         return False
 
 def load_obstacles_from_file():
-    """从 JSON 文件加载障碍物"""
     if os.path.exists(OBSTACLE_FILE):
         try:
             with open(OBSTACLE_FILE, 'r', encoding='utf-8') as f:
@@ -102,20 +100,65 @@ def get_bounding_box(poly_vertices):
     ys = [v[1] for v in poly_vertices]
     return min(xs), min(ys), max(xs), max(ys)
 
-def generate_detour_route(A, B, obstacles, flight_height, safety_meters=20.0):
+# ========== CatmullRom 样条插值（生成平滑曲线）==========
+def catmull_rom_spline(points, num_segments=20):
     """
-    生成绕行航线，确保所有路径点及线段都在障碍物外部
-    safety_meters: 安全距离（米），将转换为经纬度偏移
+    输入：控制点列表 P0, P1, P2, P3, ...
+    输出：插值后的密集点列表（平滑曲线）
+    对于首尾段，采用简化的三次贝塞尔方式处理。
     """
+    if len(points) < 2:
+        return points
+    if len(points) == 2:
+        # 两点之间线性插值
+        return [points[0] + (points[1]-points[0]) * t for t in [i/num_segments for i in range(num_segments+1)]]
+    
+    result = []
+    # 对于每对控制点之间的曲线段，使用相邻四个点计算 CatmullRom
+    for i in range(len(points)-1):
+        p0 = points[max(i-1, 0)]
+        p1 = points[i]
+        p2 = points[i+1]
+        p3 = points[min(i+2, len(points)-1)]
+        
+        # 对于端点，使用简化的贝塞尔（保持方向）
+        if i == 0:
+            # 起点段：使用 p1, p2, p3 构造二次贝塞尔？更简单：直接线性从 p1 到 p2 并稍作平滑
+            # 为了使曲线平滑，我们让起点到第一个控制点直接连线
+            pass
+        
+        # 标准 CatmullRom 公式
+        for t in [j/num_segments for j in range(num_segments)]:
+            t2 = t * t
+            t3 = t2 * t
+            x = 0.5 * ((2 * p1[0]) +
+                       (-p0[0] + p2[0]) * t +
+                       (2*p0[0] - 5*p1[0] + 4*p2[0] - p3[0]) * t2 +
+                       (-p0[0] + 3*p1[0] - 3*p2[0] + p3[0]) * t3)
+            y = 0.5 * ((2 * p1[1]) +
+                       (-p0[1] + p2[1]) * t +
+                       (2*p0[1] - 5*p1[1] + 4*p2[1] - p3[1]) * t2 +
+                       (-p0[1] + 3*p1[1] - 3*p2[1] + p3[1]) * t3)
+            result.append((x, y))
+    # 添加最后一个点
+    result.append(points[-1])
+    return result
+
+# ========== 绕行路径生成（平滑曲线）==========
+def generate_detour_route(A, B, obstacles, flight_height, safety_meters=3.0):
+    """
+    生成平滑曲线绕行航线，安全距离默认3米
+    """
+    # 找出第一个需要绕行的障碍物
     target_obs = None
     for obs in obstacles:
         if flight_height < obs["height"] and polygon_intersects_segment(obs["vertices"], A, B):
             target_obs = obs
             break
     if target_obs is None:
-        return [A, B]
+        return [A, B]  # 无冲突，返回直线
 
-    # 安全距离转换为经纬度偏移（1度 ≈ 111公里）
+    # 安全距离转换为经纬度偏移（1度≈111公里）
     expand_deg = safety_meters / 111000.0
     minx, miny, maxx, maxy = get_bounding_box(target_obs["vertices"])
     minx -= expand_deg
@@ -123,43 +166,62 @@ def generate_detour_route(A, B, obstacles, flight_height, safety_meters=20.0):
     maxx += expand_deg
     maxy += expand_deg
     rect_pts = [(minx, miny), (minx, maxy), (maxx, maxy), (maxx, miny)]
-    
+
+    # 候选路径：使用矩形的相邻顶点对作为绕行点
     candidate_pairs = [
-        (rect_pts[0], rect_pts[1]),
-        (rect_pts[1], rect_pts[2]),
-        (rect_pts[2], rect_pts[3]),
-        (rect_pts[3], rect_pts[0]),
+        (rect_pts[0], rect_pts[1]),  # 左边
+        (rect_pts[1], rect_pts[2]),  # 上边
+        (rect_pts[2], rect_pts[3]),  # 右边
+        (rect_pts[3], rect_pts[0]),  # 下边
     ]
+    best_control_points = None
     for p1, p2 in candidate_pairs:
         segs = [(A, p1), (p1, p2), (p2, B)]
         if all(not polygon_intersects_segment(target_obs["vertices"], s[0], s[1]) for s in segs):
-            return [A, p1, p2, B]
-    
-    mid_top = ((minx+maxx)/2, maxy)
-    mid_bottom = ((minx+maxx)/2, miny)
-    if not polygon_intersects_segment(target_obs["vertices"], A, mid_top) and not polygon_intersects_segment(target_obs["vertices"], mid_top, B):
-        return [A, mid_top, B]
-    if not polygon_intersects_segment(target_obs["vertices"], A, mid_bottom) and not polygon_intersects_segment(target_obs["vertices"], mid_bottom, B):
-        return [A, mid_bottom, B]
-    
-    return [A, B]
+            best_control_points = [A, p1, p2, B]
+            break
+
+    if best_control_points is None:
+        # 回退：使用矩形上下中点
+        mid_top = ((minx+maxx)/2, maxy)
+        mid_bottom = ((minx+maxx)/2, miny)
+        if not polygon_intersects_segment(target_obs["vertices"], A, mid_top) and not polygon_intersects_segment(target_obs["vertices"], mid_top, B):
+            best_control_points = [A, mid_top, B]
+        elif not polygon_intersects_segment(target_obs["vertices"], A, mid_bottom) and not polygon_intersects_segment(target_obs["vertices"], mid_bottom, B):
+            best_control_points = [A, mid_bottom, B]
+        else:
+            # 无法绕行，返回直线
+            return [A, B]
+
+    # 对控制点进行 CatmullRom 插值，生成平滑曲线点集
+    # 为了增强平滑性，在控制点之间增加额外的辅助点（可选）
+    if len(best_control_points) == 4:
+        # 在 p1 和 p2 之间增加一个中点，使曲线更圆润（避免尖角）
+        p1, p2 = best_control_points[1], best_control_points[2]
+        mid = ((p1[0]+p2[0])/2, (p1[1]+p2[1])/2)
+        # 将中点插入到 p1 和 p2 之间
+        extended = [best_control_points[0], p1, mid, p2, best_control_points[3]]
+    else:
+        extended = best_control_points
+
+    # 生成密集插值点（每段 30 个插值点，使曲线非常平滑）
+    smooth_points = catmull_rom_spline(extended, num_segments=30)
+    return smooth_points
 
 # ========== Streamlit 页面配置 ==========
 st.set_page_config(page_title="无人机地面站监控系统", layout="wide")
 
 # 初始化 session_state
-if "app_version" not in st.session_state or st.session_state.app_version != "v14_persistent_safety":
+if "app_version" not in st.session_state or st.session_state.app_version != "v15_curve_detour":
     st.session_state.sim = HeartbeatSimulator()
     st.session_state.history = []
-    # 尝试从文件加载障碍物
     loaded_obstacles = load_obstacles_from_file()
     st.session_state.obstacles = loaded_obstacles if loaded_obstacles else []
     st.session_state.default_obstacle_height = 30.0
-    st.session_state.safety_distance = 20.0  # 默认安全距离20米
+    st.session_state.safety_distance = 3.0  # 默认安全距离3米
     st.session_state.detour_route = None
-    st.session_state.app_version = "v14_persistent_safety"
+    st.session_state.app_version = "v15_curve_detour"
 else:
-    # 兼容旧数据：将纯列表转换为带高度的字典
     if st.session_state.obstacles and isinstance(st.session_state.obstacles[0], list):
         new_obstacles = []
         for poly in st.session_state.obstacles:
@@ -176,7 +238,7 @@ st.sidebar.info("✅ 卫星图底图：Esri World Imagery (WGS-84)\n若选择 GC
 
 # ========== 页面1：航线规划 ==========
 if page == "航线规划":
-    st.header("🗺️ 航线规划 + 障碍物圈选 (WGS-84 卫星图)")
+    st.header("🗺️ 航线规划 + 障碍物圈选 (平滑曲线绕行)")
 
     st.sidebar.subheader("🚧 障碍物默认高度")
     default_height = st.sidebar.number_input(
@@ -187,16 +249,8 @@ if page == "航线规划":
     st.session_state.default_obstacle_height = default_height
     st.sidebar.divider()
     
-    # ---------- 新增：安全距离滑块 ----------
-    st.sidebar.subheader("🛡️ 障碍物安全距离")
-    safety = st.sidebar.number_input(
-        "绕行安全距离 (米)", 
-        min_value=0.0, max_value=200.0, 
-        value=st.session_state.safety_distance, step=5.0,
-        help="绕行路径与障碍物的最小距离（实际会向外扩展该距离）"
-    )
-    st.session_state.safety_distance = safety
-    st.sidebar.divider()
+    # 显示安全距离（固定为3米，不可调）
+    st.sidebar.info("🛡️ 绕行安全距离：3 米（固定）")
     
     st.sidebar.subheader("📋 已添加的障碍物")
     if not st.session_state.obstacles:
@@ -221,7 +275,6 @@ if page == "航线规划":
     
     st.sidebar.metric("障碍物总数", len(st.session_state.obstacles))
     
-    # 持久化控制按钮
     st.sidebar.divider()
     col_save1, col_save2 = st.sidebar.columns(2)
     with col_save1:
@@ -257,21 +310,20 @@ if page == "航线规划":
             st.info("直接使用 WGS-84 坐标")
 
         if st.button("✈️ 检测冲突并生成绕行航线"):
-            with st.spinner("正在计算绕行路径..."):
+            with st.spinner("正在计算平滑绕行路径..."):
                 A_wgs = (display_lon_a, display_lat_a)
                 B_wgs = (display_lon_b, display_lat_b)
-                # 传入当前安全距离
                 detour = generate_detour_route(
                     A_wgs, B_wgs, 
                     st.session_state.obstacles, 
                     flight_height,
-                    st.session_state.safety_distance
+                    safety_meters=3.0  # 固定3米
                 )
                 if len(detour) == 2:
                     st.success("✅ 无冲突，无需绕行")
                     st.session_state.detour_route = None
                 else:
-                    st.success(f"✅ 已生成绕行航线，共 {len(detour)} 个航点")
+                    st.success(f"✅ 已生成平滑绕行航线，共 {len(detour)} 个航点")
                     st.session_state.detour_route = detour
                 st.rerun()
         
@@ -293,25 +345,27 @@ if page == "航线规划":
             attr='Esri World Imagery',
         )
 
-        # 原始航线
+        # 原始航线（黄色）
         folium.PolyLine(
             locations=[[display_lat_a, display_lon_a], [display_lat_b, display_lon_b]],
             color="yellow", weight=5, opacity=0.8, popup="原始航线"
         ).add_to(m)
 
-        # 绕行航线
+        # 绕行航线（蓝色，平滑曲线）
         if st.session_state.get("detour_route"):
+            # detour_route 已经是密集点序列
             detour_locs = [[lat, lng] for lng, lat in st.session_state.detour_route]
             folium.PolyLine(
                 locations=detour_locs, color="blue", weight=4, opacity=0.9,
-                popup="绕行航线"
+                popup="平滑绕行航线"
             ).add_to(m)
-            for i, (lng, lat) in enumerate(st.session_state.detour_route):
-                folium.Marker(
-                    [lat, lng], popup=f"绕行航点 {i}", icon=folium.Icon(color='blue', icon='info-sign')
-                ).add_to(m)
+            # 可选：标记起点和终点（不标记中间点，避免杂乱）
+            start_pt = st.session_state.detour_route[0]
+            end_pt = st.session_state.detour_route[-1]
+            folium.Marker([start_pt[1], start_pt[0]], popup="起点", icon=folium.Icon(color='blue', icon='play')).add_to(m)
+            folium.Marker([end_pt[1], end_pt[0]], popup="终点", icon=folium.Icon(color='blue', icon='stop')).add_to(m)
 
-        # 起点终点
+        # 起点终点（原标记，保持红色/绿色）
         folium.Marker([display_lat_a, display_lon_a], popup=f"起点 A (高度:{flight_height}m)", icon=folium.Icon(color='red', icon='play')).add_to(m)
         folium.Marker([display_lat_b, display_lon_b], popup="终点 B", icon=folium.Icon(color='green', icon='stop')).add_to(m)
 
@@ -361,7 +415,7 @@ if page == "航线规划":
 elif page == "飞行监控":
     st.header("✈️ 飞行监控 (心跳包实时状态)")
     placeholder = st.empty()
-    if st.button("开始接收实时数据", key="btn_monitor_v14"):
+    if st.button("开始接收实时数据", key="btn_monitor_v15"):
         for _ in range(50):
             packet = st.session_state.sim.generate_packet()
             st.session_state.history.append(packet)
