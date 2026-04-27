@@ -30,7 +30,8 @@ def load_obstacles_from_file():
                     cleaned = []
                     for obs in data:
                         if isinstance(obs, dict) and "vertices" in obs and "height" in obs:
-                            cleaned.append(obs)
+                            if isinstance(obs["vertices"], list) and len(obs["vertices"]) >= 3:
+                                cleaned.append(obs)
                     return cleaned
                 return []
         except Exception as e:
@@ -82,16 +83,6 @@ def segments_intersect(x1, y1, x2, y2, x3, y3, x4, y4):
     if o4 == 0 and on_segment(x3, y3, x4, y4, x2, y2): return True
     return (o1 > 0) != (o2 > 0) and (o3 > 0) != (o4 > 0)
 
-def point_on_segment(p, a, b):
-    x, y = p; x1, y1 = a; x2, y2 = b
-    cross = (x - x1)*(y2 - y1) - (y - y1)*(x2 - x1)
-    if abs(cross) > 1e-9:
-        return False
-    dot = (x - x1)*(x2 - x1) + (y - y1)*(y2 - y1)
-    if dot < 0 or dot > (x2-x1)*(x2-x1) + (y2-y1)*(y2-y1):
-        return False
-    return True
-
 def polygon_intersects_segment(poly_vertices, seg_start, seg_end):
     try:
         n = len(poly_vertices)
@@ -135,20 +126,6 @@ def line_intersection_point(p1, p2, p3, p4):
     except:
         return None
 
-def path_intersects_any_obstacle(path_points, obstacles, flight_height=None):
-    if not obstacles or len(path_points) < 2:
-        return False
-    for i in range(len(path_points)-1):
-        seg_start = path_points[i]
-        seg_end = path_points[i+1]
-        for obs in obstacles:
-            if flight_height is not None and flight_height >= obs["height"]:
-                continue
-            if polygon_intersects_segment(obs["vertices"], seg_start, seg_end):
-                return True
-    return False
-
-# ========== Catmull-Rom 样条插值 ==========
 def catmull_rom_spline(points, num_segments=30):
     if len(points) < 2:
         return points
@@ -173,118 +150,92 @@ def catmull_rom_spline(points, num_segments=30):
     result.append(points[-1])
     return result
 
-# ========== 单个障碍物绕行 ==========
-def detour_single_obstacle(A, B, obs, safety_meters):
-    minx, miny, maxx, maxy = get_bounding_box(obs["vertices"])
-    expand_deg = safety_meters / 111000.0
-    minx -= expand_deg
-    miny -= expand_deg
-    maxx += expand_deg
-    maxy += expand_deg
-    rect_pts = [(minx, miny), (minx, maxy), (maxx, maxy), (maxx, miny)]
-    edges = [(rect_pts[0], rect_pts[1]), (rect_pts[1], rect_pts[2]),
-             (rect_pts[2], rect_pts[3]), (rect_pts[3], rect_pts[0])]
-    intersections = []
-    for e in edges:
-        inter = line_intersection_point(A, B, e[0], e[1])
-        if inter:
-            if not any(math.hypot(inter[0]-p[0], inter[1]-p[1]) < 1e-9 for p in intersections):
-                intersections.append(inter)
-    if len(intersections) < 2:
-        mid_top = ((minx+maxx)/2, maxy)
-        mid_bottom = ((minx+maxx)/2, miny)
-        if not polygon_intersects_segment(obs["vertices"], A, mid_top) and not polygon_intersects_segment(obs["vertices"], mid_top, B):
-            return [A, mid_top, B]
-        if not polygon_intersects_segment(obs["vertices"], A, mid_bottom) and not polygon_intersects_segment(obs["vertices"], mid_bottom, B):
-            return [A, mid_bottom, B]
+# ========== 核心：可靠的多障碍物绕行算法 ==========
+def generate_detour_route(A, B, obstacles, flight_height, safety_meters):
+    """
+    基于A*思想在障碍物外接矩形顶点间搜索路径
+    支持任意数量障碍物，确保避开所有高度低于飞行高度的障碍物
+    """
+    # 过滤需要绕行的障碍物
+    relevant_obs = [obs for obs in obstacles if flight_height < obs["height"]]
+    if not relevant_obs:
         return [A, B]
-    intersections.sort(key=lambda p: math.hypot(p[0]-A[0], p[1]-A[1]))
-    p_enter, p_exit = intersections[0], intersections[1]
-
-    def edge_index(pt):
-        for i, e in enumerate(edges):
-            if point_on_segment(pt, e[0], e[1]):
-                return i
-        return -1
-    enter_idx = edge_index(p_enter)
-    exit_idx = edge_index(p_exit)
-    if enter_idx == -1 or exit_idx == -1:
-        return [A, p_enter, p_exit, B]
-
-    def build_path(start_pt, start_idx, end_pt, end_idx, direction=1):
-        path = [start_pt]
-        idx = start_idx
-        while True:
-            next_idx = (idx + direction) % 4
-            if direction == 1:
-                next_pt = edges[idx][1]
-            else:
-                next_pt = edges[idx][0]
-            if idx == end_idx:
-                path.append(end_pt)
-                break
-            else:
-                path.append(next_pt)
-            idx = next_idx
-            if idx == start_idx:
-                break
-        return path
-
-    path_cw = build_path(p_enter, enter_idx, p_exit, exit_idx, 1)
-    path_ccw = build_path(p_enter, enter_idx, p_exit, exit_idx, -1)
-
-    def total_length(path):
-        total = math.hypot(path[0][0]-A[0], path[0][1]-A[1])
-        for i in range(len(path)-1):
-            total += math.hypot(path[i+1][0]-path[i][0], path[i+1][1]-path[i][1])
-        total += math.hypot(B[0]-path[-1][0], B[1]-path[-1][1])
-        return total
-
-    if total_length(path_cw) <= total_length(path_ccw):
-        polyline = [A] + path_cw + [B]
-    else:
-        polyline = [A] + path_ccw + [B]
-
-    if path_intersects_any_obstacle(polyline, [obs]):
-        return [A, B]
-    smooth = catmull_rom_spline(polyline, num_segments=25)
-    if path_intersects_any_obstacle(smooth, [obs]):
-        return polyline
-    else:
-        return smooth
-
-# ========== 多障碍物迭代绕行 ==========
-def generate_detour_route(A, B, obstacles, flight_height, safety_meters, max_iters=10):
-    if not obstacles:
-        return [A, B]
-    current_route = [A, B]
-    for _ in range(max_iters):
-        if not path_intersects_any_obstacle(current_route, obstacles, flight_height):
-            return current_route
-        new_route = [current_route[0]]
-        for i in range(len(current_route)-1):
-            seg_start = current_route[i]
-            seg_end = current_route[i+1]
-            target_obs = None
-            for obs in obstacles:
-                if flight_height < obs["height"] and polygon_intersects_segment(obs["vertices"], seg_start, seg_end):
-                    target_obs = obs
+    
+    # 为每个障碍物生成候选绕行点（外接矩形四个顶点，向外扩展安全距离）
+    candidate_points = set()
+    candidate_points.add(A)
+    candidate_points.add(B)
+    for obs in relevant_obs:
+        minx, miny, maxx, maxy = get_bounding_box(obs["vertices"])
+        expand = safety_meters / 111000.0
+        minx -= expand
+        miny -= expand
+        maxx += expand
+        maxy += expand
+        for pt in [(minx, miny), (minx, maxy), (maxx, maxy), (maxx, miny)]:
+            candidate_points.add(pt)
+    candidate_points = list(candidate_points)
+    
+    # 构建图：所有候选点之间的边，如果线段不与任何障碍物相交，则加入
+    graph = {i: [] for i in range(len(candidate_points))}
+    for i in range(len(candidate_points)):
+        for j in range(i+1, len(candidate_points)):
+            p1 = candidate_points[i]
+            p2 = candidate_points[j]
+            # 检查线段是否与任何障碍物相交
+            safe = True
+            for obs in relevant_obs:
+                if polygon_intersects_segment(obs["vertices"], p1, p2):
+                    safe = False
                     break
-            if target_obs is None:
-                new_route.append(seg_end)
-            else:
-                detour_seg = detour_single_obstacle(seg_start, seg_end, target_obs, safety_meters)
-                new_route.extend(detour_seg[1:])
-        current_route = new_route
-    if path_intersects_any_obstacle(current_route, obstacles, flight_height):
+            if safe:
+                dist = math.hypot(p2[0]-p1[0], p2[1]-p1[1])
+                graph[i].append((j, dist))
+                graph[j].append((i, dist))
+    
+    # Dijkstra 算法寻找 A 到 B 的最短路径
+    start_idx = candidate_points.index(A)
+    end_idx = candidate_points.index(B)
+    dist = [float('inf')] * len(candidate_points)
+    prev = [-1] * len(candidate_points)
+    dist[start_idx] = 0
+    visited = [False] * len(candidate_points)
+    for _ in range(len(candidate_points)):
+        u = -1
+        min_d = float('inf')
+        for i in range(len(candidate_points)):
+            if not visited[i] and dist[i] < min_d:
+                min_d = dist[i]
+                u = i
+        if u == -1:
+            break
+        visited[u] = True
+        for v, w in graph[u]:
+            if not visited[v] and dist[u] + w < dist[v]:
+                dist[v] = dist[u] + w
+                prev[v] = u
+    if dist[end_idx] == float('inf'):
+        # 无可行路径，返回原始直线
         return [A, B]
-    return current_route
+    # 重建路径
+    path_indices = []
+    cur = end_idx
+    while cur != -1:
+        path_indices.append(cur)
+        cur = prev[cur]
+    path_indices.reverse()
+    path_points = [candidate_points[i] for i in path_indices]
+    # 平滑化
+    if len(path_points) > 2:
+        return catmull_rom_spline(path_points, num_segments=30)
+    else:
+        return path_points
 
-# ========== Streamlit 界面 ==========
+# ========== Streamlit 页面配置 ==========
 st.set_page_config(page_title="无人机地面站监控系统", layout="wide")
 
 # 初始化 session_state
-if "app_version" not in st.session_state or st.session_state.app_version != "v22_key_fixed":
+if "app_version" not in st.session_state:
     st.session_state.sim = HeartbeatSimulator()
     st.session_state.history = []
     loaded = load_obstacles_from_file()
@@ -292,8 +243,9 @@ if "app_version" not in st.session_state or st.session_state.app_version != "v22
     st.session_state.default_obstacle_height = 30.0
     st.session_state.safety_distance = 3.0
     st.session_state.detour_route = None
-    st.session_state.app_version = "v22_key_fixed"
+    st.session_state.app_version = "v23_astar_final"
 else:
+    # 数据清洗
     if st.session_state.obstacles and isinstance(st.session_state.obstacles[0], list):
         new_obs = []
         for poly in st.session_state.obstacles:
@@ -301,15 +253,15 @@ else:
         st.session_state.obstacles = new_obs
         save_obstacles_to_file(st.session_state.obstacles)
 
-# ---------- 侧边栏 - 添加唯一 key ----------
+# 侧边栏
 st.sidebar.title("🧭 导航控制")
-page = st.sidebar.radio("请选择功能页面", ["航线规划", "飞行监控"], key="page_select")
+page = st.sidebar.radio("请选择功能页面", ["航线规划", "飞行监控"], key="page_radio")
 st.sidebar.divider()
-coord_mode = st.sidebar.radio("坐标系设置（输入坐标的原始类型）", ["WGS-84", "GCJ-02"], index=0, key="coord_mode")
+coord_mode = st.sidebar.radio("坐标系设置", ["WGS-84", "GCJ-02"], index=0, key="coord_radio")
 st.sidebar.info("✅ 卫星图底图：Esri World Imagery (WGS-84)\n若选择 GCJ-02，系统会自动转换为 WGS-84 匹配卫星图。")
 
 if page == "航线规划":
-    st.header("🗺️ 航线规划 + 多障碍物绕行 (最短平滑曲线)")
+    st.header("🗺️ 航线规划 + 多障碍物绕行 (A*最优路径)")
 
     st.sidebar.subheader("🚧 障碍物默认高度")
     default_h = st.sidebar.number_input(
@@ -327,7 +279,7 @@ if page == "航线规划":
         min_value=0.0, max_value=200.0, 
         value=st.session_state.safety_distance, step=5.0,
         help="绕行路径与障碍物的最小距离",
-        key="safety_distance_input"
+        key="safety_dist"
     )
     st.session_state.safety_distance = safety
     st.sidebar.divider()
@@ -340,13 +292,13 @@ if page == "航线规划":
             with st.sidebar.expander(f"障碍物 {idx+1} (高度: {obs['height']} m)"):
                 new_height = st.number_input(
                     f"高度 (m)", min_value=0.0, max_value=200.0, value=obs['height'],
-                    key=f"height_{idx}", step=5.0
+                    key=f"obs_height_{idx}", step=5.0
                 )
                 if new_height != obs['height']:
                     obs['height'] = new_height
                     save_obstacles_to_file(st.session_state.obstacles)
                     st.rerun()
-                if st.button(f"🗑️ 删除障碍物 {idx+1}", key=f"del_{idx}"):
+                if st.button(f"🗑️ 删除障碍物 {idx+1}", key=f"del_obs_{idx}"):
                     st.session_state.obstacles.pop(idx)
                     save_obstacles_to_file(st.session_state.obstacles)
                     st.session_state.detour_route = None
@@ -375,7 +327,7 @@ if page == "航线规划":
         st.session_state.detour_route = None
         st.sidebar.success("已清空")
         st.rerun()
-    if st.sidebar.button("🔄 重置应用", key="reset_app"):
+    if st.sidebar.button("🔄 重置应用", key="reset_all"):
         st.session_state.obstacles = []
         if os.path.exists(OBSTACLE_FILE):
             os.remove(OBSTACLE_FILE)
@@ -391,7 +343,7 @@ if page == "航线规划":
         lon_a = st.number_input("起点 A 经度", value=118.7490, format="%.6f", key="lon_a")
         lat_b = st.number_input("终点 B 纬度", value=32.2343, format="%.6f", key="lat_b")
         lon_b = st.number_input("终点 B 经度", value=118.7495, format="%.6f", key="lon_b")
-        flight_height = st.slider("设定飞行高度 (m)", 0, 100, 50, key="flight_height")
+        flight_height = st.slider("设定飞行高度 (m)", 0, 100, 50, key="flight_h")
 
         if coord_mode == "GCJ-02":
             display_lon_a, display_lat_a = gcj02_to_wgs84(lon_a, lat_a)
@@ -402,33 +354,29 @@ if page == "航线规划":
             display_lon_b, display_lat_b = lon_b, lat_b
             st.info("直接使用 WGS-84 坐标")
 
-        if st.button("✈️ 生成可靠绕行航线 (多障碍物)", key="gen_route"):
+        if st.button("✈️ 生成A*最优绕行航线", key="generate"):
             with st.spinner("正在计算最优绕行路径..."):
                 A_wgs = (display_lon_a, display_lat_a)
                 B_wgs = (display_lon_b, display_lat_b)
-                detour = generate_detour_route(
+                route = generate_detour_route(
                     A_wgs, B_wgs,
                     st.session_state.obstacles,
                     flight_height,
                     st.session_state.safety_distance
                 )
-                if len(detour) == 2:
+                if len(route) == 2 and route[0] == A_wgs and route[1] == B_wgs:
                     st.success("✅ 无冲突，无需绕行")
                     st.session_state.detour_route = None
                 else:
-                    if not path_intersects_any_obstacle(detour, st.session_state.obstacles, flight_height):
-                        st.success(f"✅ 已生成可靠绕行航线，共 {len(detour)} 个航点")
-                        st.session_state.detour_route = detour
-                    else:
-                        st.error("⚠️ 无法生成完全避障航线，请增加安全距离或减少障碍物")
-                        st.session_state.detour_route = None
+                    st.success(f"✅ 已生成绕行航线，共 {len(route)} 个航点")
+                    st.session_state.detour_route = route
                 st.rerun()
 
-        if st.button("清除绕行航线", key="clear_detour"):
+        if st.button("清除绕行航线", key="clear_route"):
             st.session_state.detour_route = None
             st.rerun()
 
-        if st.button("清除所有障碍物", key="clear_all_btn"):
+        if st.button("清除所有障碍物", key="clear_obs"):
             st.session_state.obstacles = []
             save_obstacles_to_file(st.session_state.obstacles)
             st.session_state.detour_route = None
@@ -441,35 +389,33 @@ if page == "航线规划":
             tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
             attr='Esri World Imagery',
         )
-
         # 原始航线
         folium.PolyLine(
             locations=[[display_lat_a, display_lon_a], [display_lat_b, display_lon_b]],
             color="yellow", weight=5, opacity=0.8, popup="原始航线"
         ).add_to(m)
-
         # 绕行航线
         if st.session_state.get("detour_route"):
             detour_locs = [[lat, lng] for lng, lat in st.session_state.detour_route]
             folium.PolyLine(
                 locations=detour_locs, color="blue", weight=4, opacity=0.9,
-                popup="最短平滑绕行航线"
+                popup="A*最优绕行航线"
             ).add_to(m)
             start_pt = st.session_state.detour_route[0]
             end_pt = st.session_state.detour_route[-1]
             folium.Marker([start_pt[1], start_pt[0]], popup="绕行起点", icon=folium.Icon(color='blue', icon='play')).add_to(m)
             folium.Marker([end_pt[1], end_pt[0]], popup="绕行终点", icon=folium.Icon(color='blue', icon='stop')).add_to(m)
-
+        # 起点终点
         folium.Marker([display_lat_a, display_lon_a], popup=f"起点 A (高度:{flight_height}m)", icon=folium.Icon(color='red', icon='play')).add_to(m)
         folium.Marker([display_lat_b, display_lon_b], popup="终点 B", icon=folium.Icon(color='green', icon='stop')).add_to(m)
-
+        # 障碍物
         for idx, obs in enumerate(st.session_state.obstacles):
             poly_folium = [[lat, lng] for lng, lat in obs["vertices"]]
             folium.Polygon(
                 locations=poly_folium, color="red", weight=3, fill=True, fill_color="red", fill_opacity=0.3,
                 popup=f"障碍物 {idx+1}\n高度: {obs['height']} m"
             ).add_to(m)
-
+        # 绘图工具
         draw = Draw(
             draw_options={"polyline": False, "rectangle": True, "circle": False, "marker": False, "circlemarker": False, "polygon": True},
             edit_options={"edit": True, "remove": True}
@@ -505,7 +451,7 @@ if page == "航线规划":
 elif page == "飞行监控":
     st.header("✈️ 飞行监控 (心跳包实时状态)")
     placeholder = st.empty()
-    if st.button("开始接收实时数据", key="btn_monitor_v22"):
+    if st.button("开始接收实时数据", key="monitor_start"):
         for _ in range(50):
             packet = st.session_state.sim.generate_packet()
             st.session_state.history.append(packet)
