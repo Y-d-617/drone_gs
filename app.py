@@ -134,9 +134,8 @@ def catmull_rom_spline(points, num_segments=30):
     result.append(points[-1])
     return result
 
-# ========== 核心：可靠的多障碍物绕行（顺序绕行 + 侧向强制）==========
+# ========== 单个障碍物绕行（支持左侧/右侧/自动）==========
 def detour_single(A, B, obs, safety_meters, side="auto"):
-    """生成绕过单个障碍物的路径点列表（从A到B），支持左侧/右侧强制"""
     minx, miny, maxx, maxy = get_bounding_box(obs["vertices"])
     expand = safety_meters / 111000.0
     minx -= expand
@@ -146,25 +145,21 @@ def detour_single(A, B, obs, safety_meters, side="auto"):
     rect_pts = [(minx, miny), (minx, maxy), (maxx, maxy), (maxx, miny)]
     
     if side == "left":
-        # 使用左侧两个顶点（左下、左上）
         p1, p2 = rect_pts[0], rect_pts[1]
-        # 按距离A排序
         if math.hypot(p1[0]-A[0], p1[1]-A[1]) > math.hypot(p2[0]-A[0], p2[1]-A[1]):
             p1, p2 = p2, p1
         return [A, p1, p2, B]
     elif side == "right":
-        # 使用右侧两个顶点（右下、右上）
         p1, p2 = rect_pts[3], rect_pts[2]
         if math.hypot(p1[0]-A[0], p1[1]-A[1]) > math.hypot(p2[0]-A[0], p2[1]-A[1]):
             p1, p2 = p2, p1
         return [A, p1, p2, B]
     else:
-        # 自动模式：选择四条可能路径中最短的一条
         paths = [
-            ([A, rect_pts[0], rect_pts[1], B]),  # 左下->左上
-            ([A, rect_pts[1], rect_pts[2], B]),  # 左上->右上
-            ([A, rect_pts[2], rect_pts[3], B]),  # 右上->右下
-            ([A, rect_pts[3], rect_pts[0], B]),  # 右下->左下
+            ([A, rect_pts[0], rect_pts[1], B]),
+            ([A, rect_pts[1], rect_pts[2], B]),
+            ([A, rect_pts[2], rect_pts[3], B]),
+            ([A, rect_pts[3], rect_pts[0], B]),
         ]
         def path_len(path):
             total = math.hypot(path[1][0]-path[0][0], path[1][1]-path[0][1])
@@ -175,7 +170,6 @@ def detour_single(A, B, obs, safety_meters, side="auto"):
         return best
 
 def sequential_detour(A, B, obstacles, flight_height, safety_meters, side="auto", max_iters=10):
-    """顺序处理每个相交的障碍物，逐步构建绕行路径"""
     current_route = [A, B]
     for _ in range(max_iters):
         new_route = [current_route[0]]
@@ -183,7 +177,6 @@ def sequential_detour(A, B, obstacles, flight_height, safety_meters, side="auto"
         for i in range(len(current_route)-1):
             seg_start = current_route[i]
             seg_end = current_route[i+1]
-            # 寻找第一个与当前段相交的障碍物
             target_obs = None
             for obs in obstacles:
                 if flight_height < obs["height"] and polygon_intersects_segment(obs["vertices"], seg_start, seg_end):
@@ -198,14 +191,15 @@ def sequential_detour(A, B, obstacles, flight_height, safety_meters, side="auto"
         current_route = new_route
         if not conflict:
             # 最终验证
+            ok = True
             for i in range(len(current_route)-1):
                 for obs in obstacles:
                     if flight_height < obs["height"] and polygon_intersects_segment(obs["vertices"], current_route[i], current_route[i+1]):
-                        conflict = True
+                        ok = False
                         break
-                if conflict:
+                if not ok:
                     break
-            if not conflict:
+            if ok:
                 return current_route
     return current_route
 
@@ -213,11 +207,9 @@ def generate_detour_route(A, B, obstacles, flight_height, safety_meters, detour_
     relevant = [obs for obs in obstacles if flight_height < obs["height"]]
     if not relevant:
         return [A, B]
-    
     for attempt in range(max_attempts):
         current_safety = safety_meters * (1 + attempt * 0.5)
         route = sequential_detour(A, B, relevant, flight_height, current_safety, detour_side, max_iters=10)
-        # 验证
         ok = True
         for i in range(len(route)-1):
             for obs in relevant:
@@ -231,7 +223,6 @@ def generate_detour_route(A, B, obstacles, flight_height, safety_meters, detour_
                 return catmull_rom_spline(route, num_segments=30)
             else:
                 return route
-    # 所有尝试失败，返回原始直线（理论上不会发生）
     st.warning("⚠️ 无法找到完全避障路径，请增加安全距离或调整障碍物位置")
     return [A, B]
 
@@ -247,7 +238,7 @@ if "app_version" not in st.session_state:
     st.session_state.safety_distance = 3.0
     st.session_state.detour_route = None
     st.session_state.detour_side = "auto"
-    st.session_state.app_version = "v29_final_working"
+    st.session_state.app_version = "v31_side_buttons"
 else:
     if st.session_state.obstacles and isinstance(st.session_state.obstacles[0], list):
         new_obs = []
@@ -263,7 +254,7 @@ coord_mode = st.sidebar.radio("坐标系设置", ["WGS-84", "GCJ-02"], index=0, 
 st.sidebar.info("✅ 卫星图底图：Esri World Imagery (WGS-84)\n若选择 GCJ-02，系统会自动转换为 WGS-84 匹配卫星图。")
 
 if page == "航线规划":
-    st.header("🗺️ 航线规划 + 多障碍物可靠绕行 (顺序法)")
+    st.header("🗺️ 航线规划 + 多障碍物可靠绕行 (左侧/右侧/自动)")
 
     st.sidebar.subheader("🚧 障碍物默认高度")
     default_h = st.sidebar.number_input(
@@ -286,9 +277,9 @@ if page == "航线规划":
     st.session_state.safety_distance = safety
     st.sidebar.divider()
 
-    st.sidebar.subheader("↪️ 绕行侧选择")
+    st.sidebar.subheader("↪️ 全局绕行侧偏好")
     side_option = st.sidebar.selectbox(
-        "偏好绕行侧",
+        "偏好绕行侧（用于下方第一个按钮）",
         options=["auto", "left", "right"],
         index=["auto", "left", "right"].index(st.session_state.detour_side),
         format_func=lambda x: {"auto": "自动选择最短路径", "left": "强制从左侧绕过", "right": "强制从右侧绕过"}[x],
@@ -367,24 +358,65 @@ if page == "航线规划":
             display_lon_b, display_lat_b = lon_b, lat_b
             st.info("直接使用 WGS-84 坐标")
 
-        if st.button("✈️ 生成可靠绕行航线", key="generate"):
-            with st.spinner("正在计算绕行路径..."):
-                A_wgs = (display_lon_a, display_lat_a)
-                B_wgs = (display_lon_b, display_lat_b)
-                route = generate_detour_route(
-                    A_wgs, B_wgs,
-                    st.session_state.obstacles,
-                    flight_height,
-                    st.session_state.safety_distance,
-                    detour_side=st.session_state.detour_side
-                )
-                if len(route) == 2 and route[0] == A_wgs and route[1] == B_wgs:
-                    st.success("✅ 无冲突，无需绕行")
-                    st.session_state.detour_route = None
-                else:
-                    st.success(f"✅ 已生成绕行航线，共 {len(route)} 个航点")
-                    st.session_state.detour_route = route
-                st.rerun()
+        # ----- 三个绕行按钮 -----
+        col_btn1, col_btn2, col_btn3 = st.columns(3)
+        with col_btn1:
+            if st.button("✈️ 自动绕行", key="btn_auto", use_container_width=True):
+                with st.spinner("正在计算最优绕行路径..."):
+                    A_wgs = (display_lon_a, display_lat_a)
+                    B_wgs = (display_lon_b, display_lat_b)
+                    route = generate_detour_route(
+                        A_wgs, B_wgs,
+                        st.session_state.obstacles,
+                        flight_height,
+                        st.session_state.safety_distance,
+                        detour_side="auto"
+                    )
+                    if len(route) == 2:
+                        st.success("✅ 无冲突，无需绕行")
+                        st.session_state.detour_route = None
+                    else:
+                        st.success(f"✅ 已生成自动绕行航线，共 {len(route)} 个航点")
+                        st.session_state.detour_route = route
+                    st.rerun()
+        with col_btn2:
+            if st.button("⬅️ 左侧绕行", key="btn_left", use_container_width=True):
+                with st.spinner("正在计算左侧绕行路径..."):
+                    A_wgs = (display_lon_a, display_lat_a)
+                    B_wgs = (display_lon_b, display_lat_b)
+                    route = generate_detour_route(
+                        A_wgs, B_wgs,
+                        st.session_state.obstacles,
+                        flight_height,
+                        st.session_state.safety_distance,
+                        detour_side="left"
+                    )
+                    if len(route) == 2:
+                        st.success("✅ 无冲突，无需绕行")
+                        st.session_state.detour_route = None
+                    else:
+                        st.success(f"✅ 已生成左侧绕行航线，共 {len(route)} 个航点")
+                        st.session_state.detour_route = route
+                    st.rerun()
+        with col_btn3:
+            if st.button("➡️ 右侧绕行", key="btn_right", use_container_width=True):
+                with st.spinner("正在计算右侧绕行路径..."):
+                    A_wgs = (display_lon_a, display_lat_a)
+                    B_wgs = (display_lon_b, display_lat_b)
+                    route = generate_detour_route(
+                        A_wgs, B_wgs,
+                        st.session_state.obstacles,
+                        flight_height,
+                        st.session_state.safety_distance,
+                        detour_side="right"
+                    )
+                    if len(route) == 2:
+                        st.success("✅ 无冲突，无需绕行")
+                        st.session_state.detour_route = None
+                    else:
+                        st.success(f"✅ 已生成右侧绕行航线，共 {len(route)} 个航点")
+                        st.session_state.detour_route = route
+                    st.rerun()
 
         if st.button("清除绕行航线", key="clear_route"):
             st.session_state.detour_route = None
