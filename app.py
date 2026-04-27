@@ -110,22 +110,6 @@ def get_bounding_box(poly_vertices):
     ys = [v[1] for v in poly_vertices]
     return min(xs), min(ys), max(xs), max(ys)
 
-def line_intersection_point(p1, p2, p3, p4):
-    try:
-        x1, y1 = p1; x2, y2 = p2; x3, y3 = p3; x4, y4 = p4
-        denom = (x1-x2)*(y3-y4) - (y1-y2)*(x3-x4)
-        if abs(denom) < 1e-12:
-            return None
-        t = ((x1-x3)*(y3-y4) - (y1-y3)*(x3-x4)) / denom
-        u = -((x1-x2)*(y1-y3) - (y1-y2)*(x1-x3)) / denom
-        if 0 <= t <= 1 and 0 <= u <= 1:
-            x = x1 + t*(x2-x1)
-            y = y1 + t*(y2-y1)
-            return (x, y)
-        return None
-    except:
-        return None
-
 def catmull_rom_spline(points, num_segments=30):
     if len(points) < 2:
         return points
@@ -150,91 +134,123 @@ def catmull_rom_spline(points, num_segments=30):
     result.append(points[-1])
     return result
 
-# ========== 核心：可靠的多障碍物绕行算法 ==========
-def generate_detour_route(A, B, obstacles, flight_height, safety_meters):
-    """
-    基于A*思想在障碍物外接矩形顶点间搜索路径
-    支持任意数量障碍物，确保避开所有高度低于飞行高度的障碍物
-    """
-    # 过滤需要绕行的障碍物
-    relevant_obs = [obs for obs in obstacles if flight_height < obs["height"]]
-    if not relevant_obs:
+# ========== 核心：支持绕行侧偏好的图搜索 ==========
+def generate_detour_route(A, B, obstacles, flight_height, safety_meters, detour_side="auto", max_attempts=3):
+    relevant = [obs for obs in obstacles if flight_height < obs["height"]]
+    if not relevant:
         return [A, B]
     
-    # 为每个障碍物生成候选绕行点（外接矩形四个顶点，向外扩展安全距离）
-    candidate_points = set()
-    candidate_points.add(A)
-    candidate_points.add(B)
-    for obs in relevant_obs:
-        minx, miny, maxx, maxy = get_bounding_box(obs["vertices"])
-        expand = safety_meters / 111000.0
-        minx -= expand
-        miny -= expand
-        maxx += expand
-        maxy += expand
-        for pt in [(minx, miny), (minx, maxy), (maxx, maxy), (maxx, miny)]:
-            candidate_points.add(pt)
-    candidate_points = list(candidate_points)
-    
-    # 构建图：所有候选点之间的边，如果线段不与任何障碍物相交，则加入
-    graph = {i: [] for i in range(len(candidate_points))}
-    for i in range(len(candidate_points)):
-        for j in range(i+1, len(candidate_points)):
-            p1 = candidate_points[i]
-            p2 = candidate_points[j]
-            # 检查线段是否与任何障碍物相交
-            safe = True
-            for obs in relevant_obs:
-                if polygon_intersects_segment(obs["vertices"], p1, p2):
-                    safe = False
-                    break
-            if safe:
-                dist = math.hypot(p2[0]-p1[0], p2[1]-p1[1])
-                graph[i].append((j, dist))
-                graph[j].append((i, dist))
-    
-    # Dijkstra 算法寻找 A 到 B 的最短路径
-    start_idx = candidate_points.index(A)
-    end_idx = candidate_points.index(B)
-    dist = [float('inf')] * len(candidate_points)
-    prev = [-1] * len(candidate_points)
-    dist[start_idx] = 0
-    visited = [False] * len(candidate_points)
-    for _ in range(len(candidate_points)):
-        u = -1
-        min_d = float('inf')
-        for i in range(len(candidate_points)):
-            if not visited[i] and dist[i] < min_d:
-                min_d = dist[i]
-                u = i
-        if u == -1:
-            break
-        visited[u] = True
-        for v, w in graph[u]:
-            if not visited[v] and dist[u] + w < dist[v]:
-                dist[v] = dist[u] + w
-                prev[v] = u
-    if dist[end_idx] == float('inf'):
-        # 无可行路径，返回原始直线
-        return [A, B]
-    # 重建路径
-    path_indices = []
-    cur = end_idx
-    while cur != -1:
-        path_indices.append(cur)
-        cur = prev[cur]
-    path_indices.reverse()
-    path_points = [candidate_points[i] for i in path_indices]
-    # 平滑化
-    if len(path_points) > 2:
-        return catmull_rom_spline(path_points, num_segments=30)
-    else:
-        return path_points
+    for attempt in range(max_attempts):
+        current_safety = safety_meters * (1 + attempt * 0.5)
+        expand = current_safety / 111000.0
+        
+        # 收集所有候选点（起点、终点、每个障碍物扩展矩形的4个顶点）
+        points = [A, B]
+        for obs in relevant:
+            minx, miny, maxx, maxy = get_bounding_box(obs["vertices"])
+            minx -= expand
+            miny -= expand
+            maxx += expand
+            maxy += expand
+            points.extend([(minx, miny), (minx, maxy), (maxx, maxy), (maxx, miny)])
+        # 去重（保留顺序）
+        unique = []
+        for p in points:
+            if not any(math.hypot(p[0]-q[0], p[1]-q[1]) < 1e-9 for q in unique):
+                unique.append(p)
+        points = unique
+        n = len(points)
+        
+        # 预计算每个点相对于AB方向的侧向符号（用于代价惩罚）
+        dx = B[0] - A[0]
+        dy = B[1] - A[1]
+        length = math.hypot(dx, dy)
+        if length > 1e-9:
+            dx /= length
+            dy /= length
+        else:
+            dx, dy = 1, 0
+        
+        side_val = []
+        for p in points:
+            vx = p[0] - A[0]
+            vy = p[1] - A[1]
+            cross = vx * dy - vy * dx
+            side_val.append(cross)  # 正：左侧，负：右侧
+        
+        # 构建图
+        graph = [[] for _ in range(n)]
+        for i in range(n):
+            for j in range(i+1, n):
+                p1 = points[i]
+                p2 = points[j]
+                safe = True
+                for obs in relevant:
+                    if polygon_intersects_segment(obs["vertices"], p1, p2):
+                        safe = False
+                        break
+                if safe:
+                    dist = math.hypot(p2[0]-p1[0], p2[1]-p1[1])
+                    # 根据绕行侧偏好调整代价
+                    if detour_side == "left":
+                        # 边的中点位于左侧则代价小，否则代价大
+                        mid = ((p1[0]+p2[0])/2, (p1[1]+p2[1])/2)
+                        mid_cross = (mid[0]-A[0])*dy - (mid[1]-A[1])*dx
+                        if mid_cross > 0:
+                            cost = dist   # 左侧，正常代价
+                        else:
+                            cost = dist * 1000  # 右侧，极大惩罚
+                    elif detour_side == "right":
+                        mid = ((p1[0]+p2[0])/2, (p1[1]+p2[1])/2)
+                        mid_cross = (mid[0]-A[0])*dy - (mid[1]-A[1])*dx
+                        if mid_cross < 0:
+                            cost = dist
+                        else:
+                            cost = dist * 1000
+                    else:
+                        cost = dist
+                    graph[i].append((j, cost))
+                    graph[j].append((i, cost))
+        
+        # Dijkstra
+        start_idx = points.index(A)
+        end_idx = points.index(B)
+        dist = [float('inf')] * n
+        prev = [-1] * n
+        dist[start_idx] = 0
+        visited = [False] * n
+        for _ in range(n):
+            u = -1
+            min_d = float('inf')
+            for i in range(n):
+                if not visited[i] and dist[i] < min_d:
+                    min_d = dist[i]
+                    u = i
+            if u == -1:
+                break
+            visited[u] = True
+            for v, w in graph[u]:
+                if not visited[v] and dist[u] + w < dist[v]:
+                    dist[v] = dist[u] + w
+                    prev[v] = u
+        if dist[end_idx] != float('inf'):
+            path_idx = []
+            cur = end_idx
+            while cur != -1:
+                path_idx.append(cur)
+                cur = prev[cur]
+            path_idx.reverse()
+            path_pts = [points[i] for i in path_idx]
+            if len(path_pts) > 2:
+                return catmull_rom_spline(path_pts, num_segments=30)
+            else:
+                return path_pts
+    # 所有尝试失败，返回原始直线
+    return [A, B]
 
 # ========== Streamlit 页面配置 ==========
 st.set_page_config(page_title="无人机地面站监控系统", layout="wide")
 
-# 初始化 session_state
 if "app_version" not in st.session_state:
     st.session_state.sim = HeartbeatSimulator()
     st.session_state.history = []
@@ -243,9 +259,9 @@ if "app_version" not in st.session_state:
     st.session_state.default_obstacle_height = 30.0
     st.session_state.safety_distance = 3.0
     st.session_state.detour_route = None
-    st.session_state.app_version = "v23_astar_final"
+    st.session_state.detour_side = "auto"
+    st.session_state.app_version = "v26_side_penalty"
 else:
-    # 数据清洗
     if st.session_state.obstacles and isinstance(st.session_state.obstacles[0], list):
         new_obs = []
         for poly in st.session_state.obstacles:
@@ -253,7 +269,6 @@ else:
         st.session_state.obstacles = new_obs
         save_obstacles_to_file(st.session_state.obstacles)
 
-# 侧边栏
 st.sidebar.title("🧭 导航控制")
 page = st.sidebar.radio("请选择功能页面", ["航线规划", "飞行监控"], key="page_radio")
 st.sidebar.divider()
@@ -261,7 +276,7 @@ coord_mode = st.sidebar.radio("坐标系设置", ["WGS-84", "GCJ-02"], index=0, 
 st.sidebar.info("✅ 卫星图底图：Esri World Imagery (WGS-84)\n若选择 GCJ-02，系统会自动转换为 WGS-84 匹配卫星图。")
 
 if page == "航线规划":
-    st.header("🗺️ 航线规划 + 多障碍物绕行 (A*最优路径)")
+    st.header("🗺️ 航线规划 + 多障碍物绕行 (可指定绕行侧)")
 
     st.sidebar.subheader("🚧 障碍物默认高度")
     default_h = st.sidebar.number_input(
@@ -278,10 +293,21 @@ if page == "航线规划":
         "绕行安全距离", 
         min_value=0.0, max_value=200.0, 
         value=st.session_state.safety_distance, step=5.0,
-        help="绕行路径与障碍物的最小距离",
+        help="绕行路径与障碍物的最小距离（若找不到路径会自动增加）",
         key="safety_dist"
     )
     st.session_state.safety_distance = safety
+    st.sidebar.divider()
+
+    st.sidebar.subheader("↪️ 绕行侧选择")
+    side_option = st.sidebar.selectbox(
+        "偏好绕行侧",
+        options=["auto", "left", "right"],
+        index=["auto", "left", "right"].index(st.session_state.detour_side),
+        format_func=lambda x: {"auto": "自动选择最短路径", "left": "优先从左侧绕过", "right": "优先从右侧绕过"}[x],
+        key="side_select"
+    )
+    st.session_state.detour_side = side_option
     st.sidebar.divider()
 
     st.sidebar.subheader("📋 已添加的障碍物")
@@ -354,7 +380,7 @@ if page == "航线规划":
             display_lon_b, display_lat_b = lon_b, lat_b
             st.info("直接使用 WGS-84 坐标")
 
-        if st.button("✈️ 生成A*最优绕行航线", key="generate"):
+        if st.button("✈️ 生成绕行航线 (含侧向偏好)", key="generate"):
             with st.spinner("正在计算最优绕行路径..."):
                 A_wgs = (display_lon_a, display_lat_a)
                 B_wgs = (display_lon_b, display_lat_b)
@@ -362,7 +388,8 @@ if page == "航线规划":
                     A_wgs, B_wgs,
                     st.session_state.obstacles,
                     flight_height,
-                    st.session_state.safety_distance
+                    st.session_state.safety_distance,
+                    detour_side=st.session_state.detour_side
                 )
                 if len(route) == 2 and route[0] == A_wgs and route[1] == B_wgs:
                     st.success("✅ 无冲突，无需绕行")
@@ -399,7 +426,7 @@ if page == "航线规划":
             detour_locs = [[lat, lng] for lng, lat in st.session_state.detour_route]
             folium.PolyLine(
                 locations=detour_locs, color="blue", weight=4, opacity=0.9,
-                popup="A*最优绕行航线"
+                popup="绕行航线"
             ).add_to(m)
             start_pt = st.session_state.detour_route[0]
             end_pt = st.session_state.detour_route[-1]
