@@ -6,7 +6,8 @@ from folium.plugins import Draw
 from streamlit_folium import st_folium
 from heartbeat_sim import HeartbeatSimulator
 import math
-import jsonimport streamlit as st
+import json
+import streamlit as st
 import pandas as pd
 import time
 import folium
