@@ -13,171 +13,201 @@ import datetime
 # ========== 障碍物持久化 ==========
 OBSTACLE_FILE = "obstacles.json"
 
-def save_obstacles(obs):
+def save_obstacles_to_file(obstacles):
     try:
         with open(OBSTACLE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(obs, f, ensure_ascii=False, indent=2)
+            json.dump(obstacles, f, ensure_ascii=False, indent=2)
         return True
-    except:
+    except Exception as e:
+        st.error(f"保存障碍物失败: {e}")
         return False
 
-def load_obstacles():
+def load_obstacles_from_file():
     if os.path.exists(OBSTACLE_FILE):
         try:
             with open(OBSTACLE_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 if isinstance(data, list):
                     cleaned = []
-                    for o in data:
-                        if isinstance(o, dict) and "vertices" in o and "height" in o and len(o["vertices"])>=3:
-                            cleaned.append(o)
+                    for obs in data:
+                        if isinstance(obs, dict) and "vertices" in obs and "height" in obs:
+                            cleaned.append(obs)
                     return cleaned
-        except:
-            pass
+                return []
+        except Exception as e:
+            st.error(f"加载障碍物失败: {e}")
     return []
 
-# ========== GCJ-02 to WGS-84 ==========
+# ========== GCJ-02 转 WGS-84 ==========
 def gcj02_to_wgs84(lng, lat):
     a = 6378245.0
     ee = 0.00669342162296594323
     PI = math.pi
     def transform_lat(lng, lat):
-        ret = -100.0 + 2.0*lng + 3.0*lat + 0.2*lat*lat + 0.1*lng*lat + 0.2*math.sqrt(abs(lng))
-        ret += (20.0*math.sin(6.0*lng*PI) + 20.0*math.sin(2.0*lng*PI))*2.0/3.0
-        ret += (20.0*math.sin(lat*PI) + 40.0*math.sin(lat/3.0*PI))*2.0/3.0
-        ret += (160.0*math.sin(lat/12.0*PI) + 320*math.sin(lat*PI/30.0))*2.0/3.0
+        ret = -100.0 + 2.0 * lng + 3.0 * lat + 0.2 * lat * lat + 0.1 * lng * lat + 0.2 * math.sqrt(abs(lng))
+        ret += (20.0 * math.sin(6.0 * lng * PI) + 20.0 * math.sin(2.0 * lng * PI)) * 2.0 / 3.0
+        ret += (20.0 * math.sin(lat * PI) + 40.0 * math.sin(lat / 3.0 * PI)) * 2.0 / 3.0
+        ret += (160.0 * math.sin(lat / 12.0 * PI) + 320 * math.sin(lat * PI / 30.0)) * 2.0 / 3.0
         return ret
     def transform_lng(lng, lat):
-        ret = 300.0 + lng + 2.0*lat + 0.1*lng*lng + 0.1*lng*lat + 0.1*math.sqrt(abs(lng))
-        ret += (20.0*math.sin(6.0*lng*PI) + 20.0*math.sin(2.0*lng*PI))*2.0/3.0
-        ret += (20.0*math.sin(lng*PI) + 40.0*math.sin(lng/3.0*PI))*2.0/3.0
-        ret += (150.0*math.sin(lng/12.0*PI) + 300.0*math.sin(lng*PI/30.0))*2.0/3.0
+        ret = 300.0 + lng + 2.0 * lat + 0.1 * lng * lng + 0.1 * lng * lat + 0.1 * math.sqrt(abs(lng))
+        ret += (20.0 * math.sin(6.0 * lng * PI) + 20.0 * math.sin(2.0 * lng * PI)) * 2.0 / 3.0
+        ret += (20.0 * math.sin(lng * PI) + 40.0 * math.sin(lng / 3.0 * PI)) * 2.0 / 3.0
+        ret += (150.0 * math.sin(lng / 12.0 * PI) + 300.0 * math.sin(lng * PI / 30.0)) * 2.0 / 3.0
         return ret
-    dlat = transform_lat(lng-105.0, lat-35.0)
-    dlng = transform_lng(lng-105.0, lat-35.0)
-    radlat = lat/180.0*PI
+    dlat = transform_lat(lng - 105.0, lat - 35.0)
+    dlng = transform_lng(lng - 105.0, lat - 35.0)
+    radlat = lat / 180.0 * PI
     magic = math.sin(radlat)
-    magic = 1 - ee*magic*magic
+    magic = 1 - ee * magic * magic
     sqrtmagic = math.sqrt(magic)
-    dlat = (dlat*180.0) / ((a*(1-ee))/(magic*sqrtmagic)*PI)
-    dlng = (dlng*180.0) / (a/sqrtmagic*math.cos(radlat)*PI)
-    return lng-dlng, lat-dlat
+    dlat = (dlat * 180.0) / ((a * (1 - ee)) / (magic * sqrtmagic) * PI)
+    dlng = (dlng * 180.0) / (a / sqrtmagic * math.cos(radlat) * PI)
+    wgs_lat = lat - dlat
+    wgs_lng = lng - dlng
+    return wgs_lng, wgs_lat
 
-# ========== 几何函数 ==========
-def seg_intersect(x1,y1,x2,y2,x3,y3,x4,y4):
-    def cross(ax,ay,bx,by): return ax*by - ay*bx
-    def on_seg(px,py,qx,qy,rx,ry): return min(px,qx)<=rx<=max(px,qx) and min(py,qy)<=ry<=max(py,qy)
-    o1 = cross(x2-x1,y2-y1,x3-x1,y3-y1)
-    o2 = cross(x2-x1,y2-y1,x4-x1,y4-y1)
-    o3 = cross(x4-x3,y4-y3,x1-x3,y1-y3)
-    o4 = cross(x4-x3,y4-y3,x2-x3,y2-y3)
-    if o1==0 and on_seg(x1,y1,x2,y2,x3,y3): return True
-    if o2==0 and on_seg(x1,y1,x2,y2,x4,y4): return True
-    if o3==0 and on_seg(x3,y3,x4,y4,x1,y1): return True
-    if o4==0 and on_seg(x3,y3,x4,y4,x2,y2): return True
-    return (o1>0)!=(o2>0) and (o3>0)!=(o4>0)
+# ========== 几何辅助函数 ==========
+def segments_intersect(x1, y1, x2, y2, x3, y3, x4, y4):
+    def cross(ax, ay, bx, by):
+        return ax*by - ay*bx
+    def on_segment(px, py, qx, qy, rx, ry):
+        return min(px, qx) <= rx <= max(px, qx) and min(py, qy) <= ry <= max(py, qy)
+    o1 = cross(x2-x1, y2-y1, x3-x1, y3-y1)
+    o2 = cross(x2-x1, y2-y1, x4-x1, y4-y1)
+    o3 = cross(x4-x3, y4-y3, x1-x3, y1-y3)
+    o4 = cross(x4-x3, y4-y3, x2-x3, y2-y3)
+    if o1 == 0 and on_segment(x1, y1, x2, y2, x3, y3): return True
+    if o2 == 0 and on_segment(x1, y1, x2, y2, x4, y4): return True
+    if o3 == 0 and on_segment(x3, y3, x4, y4, x1, y1): return True
+    if o4 == 0 and on_segment(x3, y3, x4, y4, x2, y2): return True
+    return (o1 > 0) != (o2 > 0) and (o3 > 0) != (o4 > 0)
 
-def poly_intersects_seg(poly, s, e):
+def polygon_intersects_segment(poly_vertices, seg_start, seg_end):
     try:
-        n = len(poly)
-        if n<3: return False
+        n = len(poly_vertices)
+        if n < 3:
+            return False
         for i in range(n):
-            x1,y1 = poly[i]
-            x2,y2 = poly[(i+1)%n]
-            if seg_intersect(s[0],s[1],e[0],e[1], x1,y1,x2,y2):
+            x1, y1 = poly_vertices[i]
+            x2, y2 = poly_vertices[(i+1)%n]
+            if segments_intersect(seg_start[0], seg_start[1], seg_end[0], seg_end[1], x1, y1, x2, y2):
                 return True
-        mx = (s[0]+e[0])/2
-        my = (s[1]+e[1])/2
+        mid_x = (seg_start[0] + seg_end[0]) / 2
+        mid_y = (seg_start[1] + seg_end[1]) / 2
         inside = False
         for i in range(n):
-            x1,y1 = poly[i]
-            x2,y2 = poly[(i+1)%n]
-            if ((y1>my)!=(y2>my)) and (mx < (x2-x1)*(my-y1)/(y2-y1)+x1):
+            x1, y1 = poly_vertices[i]
+            x2, y2 = poly_vertices[(i+1)%n]
+            if ((y1 > mid_y) != (y2 > mid_y)) and (mid_x < (x2 - x1) * (mid_y - y1) / (y2 - y1) + x1):
                 inside = not inside
         return inside
     except:
         return False
 
-def bbox(poly):
-    xs = [v[0] for v in poly]
-    ys = [v[1] for v in poly]
+def get_bounding_box(poly_vertices):
+    xs = [v[0] for v in poly_vertices]
+    ys = [v[1] for v in poly_vertices]
     return min(xs), min(ys), max(xs), max(ys)
 
-def catmull_rom_spline(pts, seg=30):
-    if len(pts)<2: return pts
-    if len(pts)==2:
-        return [pts[0] + (pts[1]-pts[0])*t for t in [i/seg for i in range(seg+1)]]
-    res = []
-    for i in range(len(pts)-1):
-        p0 = pts[max(i-1,0)]
-        p1 = pts[i]
-        p2 = pts[i+1]
-        p3 = pts[min(i+2,len(pts)-1)]
-        for t in [j/seg for j in range(seg)]:
+def catmull_rom_spline(points, num_segments=25):
+    if len(points) < 2:
+        return points
+    if len(points) == 2:
+        return [points[0] + (points[1]-points[0]) * t for t in [i/num_segments for i in range(num_segments+1)]]
+    result = []
+    for i in range(len(points)-1):
+        p0 = points[max(i-1, 0)]
+        p1 = points[i]
+        p2 = points[i+1]
+        p3 = points[min(i+2, len(points)-1)]
+        for t in [j/num_segments for j in range(num_segments)]:
             t2 = t*t
             t3 = t2*t
-            x = 0.5 * ((2*p1[0]) + (-p0[0]+p2[0])*t + (2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2 + (-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3)
-            y = 0.5 * ((2*p1[1]) + (-p0[1]+p2[1])*t + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2 + (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3)
-            res.append((x,y))
-    res.append(pts[-1])
-    return res
+            x = 0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * t +
+                       (2*p0[0] - 5*p1[0] + 4*p2[0] - p3[0]) * t2 +
+                       (-p0[0] + 3*p1[0] - 3*p2[0] + p3[0]) * t3)
+            y = 0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * t +
+                       (2*p0[1] - 5*p1[1] + 4*p2[1] - p3[1]) * t2 +
+                       (-p0[1] + 3*p1[1] - 3*p2[1] + p3[1]) * t3)
+            result.append((x, y))
+    result.append(points[-1])
+    return result
 
-# ========== 绕行生成 ==========
-def detour_segment(A, B, obs, safe_m, side):
-    mx, my, Mx, My = bbox(obs["vertices"])
-    exp = safe_m / 111000.0
-    mx -= exp; my -= exp; Mx += exp; My += exp
-    pts = [(mx,my), (mx,My), (Mx,My), (Mx,my)]
+# ========== 单个障碍物平滑绕行 ==========
+def smooth_detour_segment(A, B, obs, safety_meters, side="auto"):
+    minx, miny, maxx, maxy = get_bounding_box(obs["vertices"])
+    expand = safety_meters / 111000.0
+    minx -= expand
+    miny -= expand
+    maxx += expand
+    maxy += expand
+    rect_pts = [(minx, miny), (minx, maxy), (maxx, maxy), (maxx, miny)]
     if side == "left":
-        p1, p2 = pts[0], pts[1]
+        p1, p2 = rect_pts[0], rect_pts[1]
     elif side == "right":
-        p1, p2 = pts[3], pts[2]
+        p1, p2 = rect_pts[3], rect_pts[2]
     else:
-        paths = [([A,pts[0],pts[1],B]), ([A,pts[1],pts[2],B]), ([A,pts[2],pts[3],B]), ([A,pts[3],pts[0],B])]
-        best = min(paths, key=lambda p: math.hypot(p[1][0]-p[0][0], p[1][1]-p[0][1])+math.hypot(p[2][0]-p[1][0], p[2][1]-p[1][1])+math.hypot(p[3][0]-p[2][0], p[3][1]-p[2][1]))
-        return catmull_rom_spline(best, 30)
+        # 自动模式：选择最短的相邻边
+        paths = [
+            ([A, rect_pts[0], rect_pts[1], B]),
+            ([A, rect_pts[1], rect_pts[2], B]),
+            ([A, rect_pts[2], rect_pts[3], B]),
+            ([A, rect_pts[3], rect_pts[0], B]),
+        ]
+        def path_len(path):
+            return math.hypot(path[1][0]-path[0][0], path[1][1]-path[0][1]) + \
+                   math.hypot(path[2][0]-path[1][0], path[2][1]-path[1][1]) + \
+                   math.hypot(path[3][0]-path[2][0], path[3][1]-path[2][1])
+        best = min(paths, key=path_len)
+        return catmull_rom_spline(best, num_segments=25)
+    # 按距离起点排序
     if math.hypot(p1[0]-A[0], p1[1]-A[1]) > math.hypot(p2[0]-A[0], p2[1]-A[1]):
         p1, p2 = p2, p1
-    return catmull_rom_spline([A,p1,p2,B], 30)
+    control = [A, p1, p2, B]
+    return catmull_rom_spline(control, num_segments=25)
 
-def generate_route(A, B, obstacles, flight_h, safe_m, side="auto", max_iter=10):
-    relevant = [o for o in obstacles if flight_h < o["height"]]
-    if not relevant: return [A,B]
-    route = [A,B]
-    for _ in range(max_iter):
-        new = [route[0]]
+def generate_route(A, B, obstacles, flight_height, safety_meters, side="auto", max_iters=10):
+    relevant = [obs for obs in obstacles if flight_height < obs["height"]]
+    if not relevant:
+        return [A, B]
+    current = [A, B]
+    for _ in range(max_iters):
+        new_route = [current[0]]
         conflict = False
-        for i in range(len(route)-1):
-            s = route[i]
-            e = route[i+1]
+        for i in range(len(current)-1):
+            s_start = current[i]
+            s_end = current[i+1]
             target = None
-            for o in relevant:
-                if poly_intersects_seg(o["vertices"], s, e):
-                    target = o
+            for obs in relevant:
+                if polygon_intersects_segment(obs["vertices"], s_start, s_end):
+                    target = obs
                     break
             if target is None:
-                new.append(e)
+                new_route.append(s_end)
             else:
                 conflict = True
-                seg = detour_segment(s, e, target, safe_m, side)
-                new.extend(seg[1:])
-        route = new
+                seg = smooth_detour_segment(s_start, s_end, target, safety_meters, side)
+                new_route.extend(seg[1:])
+        current = new_route
         if not conflict:
-            return route
-    return route
+            return current
+    return current
 
-# ========== Streamlit 页面 ==========
+# ========== Streamlit 应用 ==========
 st.set_page_config(page_title="无人机地面站监控系统", layout="wide")
 
-# 初始化 session_state (使用带前缀的键避免冲突)
+# 初始化 session_state（一次性，避免动态添加键）
 if "init_done" not in st.session_state:
     st.session_state.sim = HeartbeatSimulator()
     st.session_state.history = []
-    st.session_state.obstacles = load_obstacles()
-    st.session_state.default_h = 30.0
-    st.session_state.safe_m = 3.0
+    loaded = load_obstacles_from_file()
+    st.session_state.obstacles = loaded if loaded else []
+    st.session_state.default_height = 30.0
+    st.session_state.safety = 3.0
     st.session_state.route = None
-    st.session_state.route_side = "auto"
+    st.session_state.side = "auto"
+    # 飞行监控
     st.session_state.flight_route = None
     st.session_state.flight_idx = 0
     st.session_state.flight_active = False
@@ -189,77 +219,73 @@ if "init_done" not in st.session_state:
     st.session_state.flight_travelled = 0.0
     st.session_state.current_pos = None
     st.session_state.init_done = True
-else:
-    # 兼容旧数据
-    if st.session_state.obstacles and isinstance(st.session_state.obstacles[0], list):
-        new = []
-        for poly in st.session_state.obstacles:
-            new.append({"vertices": poly, "height": 30.0})
-        st.session_state.obstacles = new
-        save_obstacles(new)
 
-st.sidebar.title("导航控制")
-page = st.sidebar.radio("页面", ["航线规划", "飞行监控"])
-coord_mode = st.sidebar.radio("坐标系", ["WGS-84", "GCJ-02"], index=0)
-st.sidebar.info("卫星图: Esri World Imagery (WGS-84)")
+# 侧边栏
+st.sidebar.title("🧭 导航控制")
+page = st.sidebar.radio("页面", ["航线规划", "飞行监控"], key="page_select")
+st.sidebar.divider()
+coord_mode = st.sidebar.radio("坐标系", ["WGS-84", "GCJ-02"], index=0, key="coord_select")
+st.sidebar.info("卫星图底图: Esri World Imagery (WGS-84)")
 
 # ========== 航线规划页面 ==========
 if page == "航线规划":
     st.header("🗺️ 航线规划 + 障碍物圈选")
 
-    st.sidebar.subheader("障碍物默认高度")
-    dh = st.sidebar.number_input("米", 0.0, 200.0, st.session_state.default_h, 5.0)
-    st.session_state.default_h = dh
-
-    st.sidebar.subheader("安全距离 (米)")
-    sm = st.sidebar.number_input("绕行安全距离", 0.0, 200.0, st.session_state.safe_m, 5.0)
-    st.session_state.safe_m = sm
-
-    st.sidebar.subheader("绕行侧")
-    side_opt = st.sidebar.selectbox("偏好", ["auto", "left", "right"], index=["auto","left","right"].index(st.session_state.route_side))
-    st.session_state.route_side = side_opt
-
-    st.sidebar.subheader("已添加的障碍物")
-    if not st.session_state.obstacles:
-        st.sidebar.write("暂无")
-    else:
-        for idx, obs in enumerate(st.session_state.obstacles):
-            with st.sidebar.expander(f"障碍物 {idx+1} (高度: {obs['height']} m)"):
-                nh = st.number_input("高度(m)", 0.0, 200.0, obs['height'], 5.0, key=f"oh_{idx}")
-                if nh != obs['height']:
-                    obs['height'] = nh
-                    save_obstacles(st.session_state.obstacles)
-                    st.rerun()
-                if st.button(f"删除", key=f"del_{idx}"):
-                    st.session_state.obstacles.pop(idx)
-                    save_obstacles(st.session_state.obstacles)
-                    st.session_state.route = None
-                    st.session_state.flight_route = None
-                    st.rerun()
-    st.sidebar.metric("障碍物总数", len(st.session_state.obstacles))
-    if st.sidebar.button("💾 保存"):
-        save_obstacles(st.session_state.obstacles)
-        st.sidebar.success("已保存")
-    if st.sidebar.button("📂 加载"):
-        loaded = load_obstacles()
-        if loaded:
-            st.session_state.obstacles = loaded
+    with st.sidebar:
+        st.subheader("障碍物默认高度")
+        default_h = st.number_input("米", 0.0, 200.0, st.session_state.default_height, 5.0, key="dh_input")
+        st.session_state.default_height = default_h
+        st.divider()
+        st.subheader("安全距离 (米)")
+        safety_val = st.number_input("绕行安全距离", 0.0, 200.0, st.session_state.safety, 5.0, key="sf_input")
+        st.session_state.safety = safety_val
+        st.divider()
+        st.subheader("绕行侧")
+        side_opt = st.selectbox("偏好", ["auto", "left", "right"], index=["auto","left","right"].index(st.session_state.side), key="side_select")
+        st.session_state.side = side_opt
+        st.divider()
+        st.subheader("已添加的障碍物")
+        if not st.session_state.obstacles:
+            st.write("暂无")
+        else:
+            for idx, obs in enumerate(st.session_state.obstacles):
+                with st.expander(f"障碍物 {idx+1} (高度: {obs['height']} m)"):
+                    nh = st.number_input("高度(m)", 0.0, 200.0, obs['height'], 5.0, key=f"h_{idx}")
+                    if nh != obs['height']:
+                        obs['height'] = nh
+                        save_obstacles_to_file(st.session_state.obstacles)
+                        st.rerun()
+                    if st.button(f"删除", key=f"del_{idx}"):
+                        st.session_state.obstacles.pop(idx)
+                        save_obstacles_to_file(st.session_state.obstacles)
+                        st.session_state.route = None
+                        st.session_state.flight_route = None
+                        st.rerun()
+        st.metric("障碍物总数", len(st.session_state.obstacles))
+        st.divider()
+        if st.button("💾 保存"):
+            save_obstacles_to_file(st.session_state.obstacles)
+            st.success("已保存")
+        if st.button("📂 加载"):
+            loaded = load_obstacles_from_file()
+            if loaded:
+                st.session_state.obstacles = loaded
+                st.rerun()
+        if st.button("🧹 清空所有"):
+            st.session_state.obstacles = []
+            if os.path.exists(OBSTACLE_FILE): os.remove(OBSTACLE_FILE)
+            st.session_state.route = None
+            st.session_state.flight_route = None
             st.rerun()
-    if st.sidebar.button("🧹 清空所有"):
-        st.session_state.obstacles = []
-        if os.path.exists(OBSTACLE_FILE): os.remove(OBSTACLE_FILE)
-        st.session_state.route = None
-        st.session_state.flight_route = None
-        st.rerun()
 
     col1, col2 = st.columns([1,2])
     with col1:
         st.subheader("坐标输入")
-        lat_a = st.number_input("起点纬度", value=32.2322, format="%.6f")
-        lon_a = st.number_input("起点经度", value=118.7490, format="%.6f")
-        lat_b = st.number_input("终点纬度", value=32.2343, format="%.6f")
-        lon_b = st.number_input("终点经度", value=118.7495, format="%.6f")
-        fly_h = st.slider("飞行高度(m)", 0, 100, 50)
+        lat_a = st.number_input("起点纬度", value=32.2322, format="%.6f", key="lat_a")
+        lon_a = st.number_input("起点经度", value=118.7490, format="%.6f", key="lon_a")
+        lat_b = st.number_input("终点纬度", value=32.2343, format="%.6f", key="lat_b")
+        lon_b = st.number_input("终点经度", value=118.7495, format="%.6f", key="lon_b")
+        fly_h = st.slider("飞行高度(m)", 0, 100, 50, key="fh")
 
         if coord_mode == "GCJ-02":
             d_lon_a, d_lat_a = gcj02_to_wgs84(lon_a, lat_a)
@@ -268,11 +294,11 @@ if page == "航线规划":
             d_lon_a, d_lat_a = lon_a, lat_a
             d_lon_b, d_lat_b = lon_b, lat_b
 
-        if st.button("✈️ 生成平滑绕行航线", use_container_width=True):
+        if st.button("✈️ 生成平滑绕行航线", use_container_width=True, key="gen_btn"):
             with st.spinner("计算中..."):
                 A = (d_lon_a, d_lat_a)
                 B = (d_lon_b, d_lat_b)
-                route = generate_route(A, B, st.session_state.obstacles, fly_h, st.session_state.safe_m, st.session_state.route_side)
+                route = generate_route(A, B, st.session_state.obstacles, fly_h, st.session_state.safety, st.session_state.side)
                 if len(route) == 2:
                     st.success("无冲突，无需绕行")
                     st.session_state.route = None
@@ -283,7 +309,7 @@ if page == "航线规划":
                     st.session_state.flight_route = route
                 st.rerun()
 
-        if st.button("清除航线"):
+        if st.button("清除航线", use_container_width=True, key="clear_route_btn"):
             st.session_state.route = None
             st.session_state.flight_route = None
             st.rerun()
@@ -293,20 +319,25 @@ if page == "航线规划":
         m = folium.Map(location=center, zoom_start=17,
                        tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
                        attr='Esri World Imagery')
+        # 原始航线
         folium.PolyLine([[d_lat_a, d_lon_a], [d_lat_b, d_lon_b]], color="yellow", weight=5, opacity=0.8, popup="原始航线").add_to(m)
+        # 规划航线
         if st.session_state.route:
             route_locs = [[lat, lng] for lng, lat in st.session_state.route]
             folium.PolyLine(route_locs, color="blue", weight=4, opacity=0.9, popup="规划航线").add_to(m)
-            spt = st.session_state.route[0]
-            ept = st.session_state.route[-1]
-            folium.Marker([spt[1], spt[0]], popup="起点", icon=folium.Icon(color='blue', icon='play')).add_to(m)
-            folium.Marker([ept[1], ept[0]], popup="终点", icon=folium.Icon(color='blue', icon='stop')).add_to(m)
+            start_pt = st.session_state.route[0]
+            end_pt = st.session_state.route[-1]
+            folium.Marker([start_pt[1], start_pt[0]], popup="起点", icon=folium.Icon(color='blue', icon='play')).add_to(m)
+            folium.Marker([end_pt[1], end_pt[0]], popup="终点", icon=folium.Icon(color='blue', icon='stop')).add_to(m)
+        # 起点终点标记
         folium.Marker([d_lat_a, d_lon_a], popup=f"起点A (高度:{fly_h}m)", icon=folium.Icon(color='red', icon='play')).add_to(m)
         folium.Marker([d_lat_b, d_lon_b], popup="终点B", icon=folium.Icon(color='green', icon='stop')).add_to(m)
+        # 障碍物
         for obs in st.session_state.obstacles:
             poly = [[lat, lng] for lng, lat in obs["vertices"]]
             folium.Polygon(poly, color="red", weight=3, fill=True, fill_color="red", fill_opacity=0.3,
                            popup=f"高度 {obs['height']} m").add_to(m)
+        # 绘图工具
         draw = Draw(draw_options={"polyline":False,"rectangle":True,"circle":False,"marker":False,"circlemarker":False,"polygon":True},
                     edit_options={"edit":True,"remove":True})
         draw.add_to(m)
@@ -320,9 +351,9 @@ if page == "航线规划":
                 poly_wgs84 = [(lng, lat) for lng, lat in ring]
                 exists = any(obs["vertices"] == poly_wgs84 for obs in st.session_state.obstacles)
                 if not exists:
-                    new_obs = {"vertices": poly_wgs84, "height": st.session_state.default_h}
+                    new_obs = {"vertices": poly_wgs84, "height": st.session_state.default_height}
                     st.session_state.obstacles.append(new_obs)
-                    save_obstacles(st.session_state.obstacles)
+                    save_obstacles_to_file(st.session_state.obstacles)
                     st.success(f"已添加障碍物 (高度 {new_obs['height']} m)")
                     st.rerun()
             elif geom == "Rectangle" and coords:
@@ -330,9 +361,9 @@ if page == "航线规划":
                 rect = [(lng1, lat1), (lng2, lat1), (lng2, lat2), (lng1, lat2)]
                 exists = any(obs["vertices"] == rect for obs in st.session_state.obstacles)
                 if not exists:
-                    new_obs = {"vertices": rect, "height": st.session_state.default_h}
+                    new_obs = {"vertices": rect, "height": st.session_state.default_height}
                     st.session_state.obstacles.append(new_obs)
-                    save_obstacles(st.session_state.obstacles)
+                    save_obstacles_to_file(st.session_state.obstacles)
                     st.success("已添加矩形障碍物")
                     st.rerun()
 
@@ -349,15 +380,21 @@ elif page == "飞行监控":
     for i in range(len(route)-1):
         total_dist += math.hypot(route[i+1][0]-route[i][0], route[i+1][1]-route[i][1]) * 111000.0
 
+    # 初始化位置（如果还未初始化）
     if st.session_state.current_pos is None:
         st.session_state.current_pos = route[0]
         st.session_state.flight_idx = 0
         st.session_state.flight_travelled = 0.0
         st.session_state.flight_battery = 100.0
+        st.session_state.flight_active = False
+        st.session_state.flight_paused = False
+        st.session_state.flight_start = None
+        st.session_state.flight_last_update = None
 
-    c1,c2,c3,c4,c5 = st.columns(5)
-    with c1:
-        if st.button("▶️ 开始任务", use_container_width=True):
+    # 控制按钮
+    col_a, col_b, col_c, col_d, col_e = st.columns(5)
+    with col_a:
+        if st.button("▶️ 开始任务", use_container_width=True, key="start_mission"):
             if st.session_state.flight_idx >= len(route)-1:
                 st.session_state.flight_idx = 0
                 st.session_state.flight_travelled = 0.0
@@ -371,14 +408,14 @@ elif page == "飞行监控":
                 st.session_state.flight_start = time.time()
                 st.session_state.flight_last_update = time.time()
             st.rerun()
-    with c2:
-        if st.button("⏸️ 暂停", use_container_width=True):
+    with col_b:
+        if st.button("⏸️ 暂停", use_container_width=True, key="pause_mission"):
             if st.session_state.flight_active and not st.session_state.flight_paused:
                 st.session_state.flight_paused = True
                 st.session_state.flight_active = False
                 st.rerun()
-    with c3:
-        if st.button("⏹️ 停止", use_container_width=True):
+    with col_c:
+        if st.button("⏹️ 停止", use_container_width=True, key="stop_mission"):
             st.session_state.flight_active = False
             st.session_state.flight_paused = False
             st.session_state.flight_idx = 0
@@ -388,8 +425,8 @@ elif page == "飞行监控":
             st.session_state.flight_start = None
             st.session_state.flight_last_update = None
             st.rerun()
-    with c4:
-        if st.button("🔄 重置", use_container_width=True):
+    with col_d:
+        if st.button("🔄 重置", use_container_width=True, key="reset_mission"):
             st.session_state.flight_active = False
             st.session_state.flight_paused = False
             st.session_state.flight_idx = 0
@@ -399,10 +436,11 @@ elif page == "飞行监控":
             st.session_state.flight_start = None
             st.session_state.flight_last_update = None
             st.rerun()
-    with c5:
-        spd = st.number_input("速度(m/s)", 1.0, 30.0, st.session_state.flight_speed, 1.0)
+    with col_e:
+        spd = st.number_input("速度(m/s)", 1.0, 30.0, st.session_state.flight_speed, 1.0, key="speed_input")
         st.session_state.flight_speed = spd
 
+    # 飞行位置更新（连续移动）
     if st.session_state.flight_active and not st.session_state.flight_paused:
         now = time.time()
         if st.session_state.flight_last_update is None:
@@ -411,13 +449,13 @@ elif page == "飞行监控":
         if dt > 0:
             move = st.session_state.flight_speed * dt
             while move > 0 and st.session_state.flight_idx < len(route)-1:
-                s = route[st.session_state.flight_idx]
-                e = route[st.session_state.flight_idx+1]
-                seg_len = math.hypot(e[0]-s[0], e[1]-s[1]) * 111000.0
+                seg_start = route[st.session_state.flight_idx]
+                seg_end = route[st.session_state.flight_idx+1]
+                seg_len = math.hypot(seg_end[0]-seg_start[0], seg_end[1]-seg_start[1]) * 111000.0
                 if move < seg_len:
                     ratio = move / seg_len
-                    cur_lng = s[0] + ratio*(e[0]-s[0])
-                    cur_lat = s[1] + ratio*(e[1]-s[1])
+                    cur_lng = seg_start[0] + ratio * (seg_end[0]-seg_start[0])
+                    cur_lat = seg_start[1] + ratio * (seg_end[1]-seg_start[1])
                     st.session_state.current_pos = (cur_lng, cur_lat)
                     st.session_state.flight_travelled += move
                     st.session_state.flight_battery = max(0, st.session_state.flight_battery - move/50.0)
@@ -436,6 +474,7 @@ elif page == "飞行监控":
                 time.sleep(0.05)
                 st.rerun()
 
+    # 显示飞行指标
     idx = st.session_state.flight_idx
     travelled = st.session_state.flight_travelled
     remaining = max(0.0, total_dist - travelled)
@@ -444,27 +483,31 @@ elif page == "飞行监控":
     eta_str = str(datetime.timedelta(seconds=int(eta))) if eta<86400 else ">1天"
     elapsed = time.time() - st.session_state.flight_start if st.session_state.flight_start else 0
     elapsed_str = str(datetime.timedelta(seconds=int(elapsed)))
+    status = "运行中" if (st.session_state.flight_active and not st.session_state.flight_paused) else \
+             ("已暂停" if st.session_state.flight_paused else ("已完成" if idx>=len(route)-1 else "待机"))
 
     st.markdown("---")
-    m1,m2,m3,m4,m5 = st.columns(5)
-    m1.metric("当前航点", f"{idx+1}/{len(route)}")
-    m1.write(f"进度: {prog*100:.1f}%")
-    m2.metric("飞行速度", f"{st.session_state.flight_speed} m/s")
-    m3.metric("已用时间", elapsed_str)
-    m4.metric("剩余距离", f"{remaining:.0f} m")
-    m5.metric("预计到达", eta_str)
+    c1,c2,c3,c4,c5 = st.columns(5)
+    c1.metric("当前航点", f"{idx+1}/{len(route)}")
+    c1.write(f"进度: {prog*100:.1f}%")
+    c2.metric("飞行速度", f"{st.session_state.flight_speed} m/s")
+    c3.metric("已用时间", elapsed_str)
+    c4.metric("剩余距离", f"{remaining:.0f} m")
+    c5.metric("预计到达", eta_str)
     st.markdown("---")
-    bc1, bc2 = st.columns([1,3])
-    bc1.metric("电量模拟", f"{st.session_state.flight_battery:.1f}%")
-    bc2.progress(st.session_state.flight_battery/100.0)
+    batt_col1, batt_col2 = st.columns([1,3])
+    batt_col1.metric("电量模拟", f"{st.session_state.flight_battery:.1f}%")
+    batt_col2.progress(st.session_state.flight_battery/100.0)
 
+    # 通信链路
     st.subheader("通信链路拓扑与数据流")
-    t1,t2,t3 = st.columns(3)
-    t1.success("GCS 在线\n地面站\n192.168.1.100")
-    t2.success("OBC 在线\n机载计算机\nRaspberry Pi 4")
-    t3.success("FCU 在线\n飞控\nPX4 / ArduPilot")
+    cc1,cc2,cc3 = st.columns(3)
+    cc1.success("GCS 在线\n地面站\n192.168.1.100")
+    cc2.success("OBC 在线\n机载计算机\nRaspberry Pi 4")
+    cc3.success("FCU 在线\n飞控\nPX4 / ArduPilot")
     st.info("MAVLink 已连接")
 
+    # 实时地图
     st.subheader("实时飞行地图")
     map_center = [st.session_state.current_pos[1], st.session_state.current_pos[0]]
     m = folium.Map(location=map_center, zoom_start=17,
