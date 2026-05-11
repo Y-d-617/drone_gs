@@ -136,40 +136,35 @@ def catmull_rom_spline(points, num_segments=30):
     result.append(points[-1])
     return result
 
-# ========== 改进的安全区域扩展 ==========
-def expand_bbox(obs, safety_meters):
+# ========== 安全区域扩展（生成缓冲多边形） ==========
+def get_expanded_rect_polygon(obs, safety_meters):
+    """返回障碍物的安全扩展矩形四个顶点（逆时针），用于代替原障碍物进行碰撞检测"""
     minx, miny, maxx, maxy = get_bounding_box(obs["vertices"])
     center_lat = (miny + maxy) / 2.0
     meters_per_deg_lon = 111320.0 * math.cos(math.radians(center_lat))
     expand_lon = safety_meters / meters_per_deg_lon
     expand_lat = safety_meters / 111000.0
-    return (minx - expand_lon, miny - expand_lat,
-            maxx + expand_lon, maxy + expand_lat)
+    minx -= expand_lon
+    miny -= expand_lat
+    maxx += expand_lon
+    maxy += expand_lat
+    return [
+        (minx, miny),
+        (minx, maxy),
+        (maxx, maxy),
+        (maxx, miny)
+    ]
 
-# ========== 安全平滑函数（强化安全距离） ==========
-def safe_smooth_route(route_points, obstacles, flight_height, safety_meters):
-    """平滑路径，并确保平滑后不会进入障碍物的安全扩展区域内"""
-    if len(route_points) <= 2:
-        return route_points
-    smooth = catmull_rom_spline(route_points, num_segments=30)
-    relevant = [obs for obs in obstacles if flight_height < obs["height"]]
-    # 相交检测
-    for i in range(len(smooth)-1):
-        for obs in relevant:
-            if polygon_intersects_segment(obs["vertices"], smooth[i], smooth[i+1]):
-                return route_points
-    # 距离检测：任一平滑点落入扩展矩形内部（安全距离以内）则退回折线
-    for pt in smooth:
-        for obs in relevant:
-            minx, miny, maxx, maxy = expand_bbox(obs, safety_meters)
-            if minx <= pt[0] <= maxx and miny <= pt[1] <= maxy:
-                return route_points
-    return smooth
+# ========== 统一碰撞检测：基于扩展多边形 ==========
+def segment_collides_with_obstacle(obs, safety_meters, seg_start, seg_end):
+    """线段是否与障碍物的安全扩展区域相交（使用矩形近似）"""
+    expanded = get_expanded_rect_polygon(obs, safety_meters)
+    return polygon_intersects_segment(expanded, seg_start, seg_end)
 
-# ========== 现有顺序绕行函数 ==========
+# ========== 绕行核心函数（内部使用扩展多边形进行碰撞检测） ==========
 def detour_single(A, B, obs, safety_meters, side="auto"):
-    minx, miny, maxx, maxy = expand_bbox(obs, safety_meters)
-    rect_pts = [(minx, miny), (minx, maxy), (maxx, maxy), (maxx, miny)]
+    expanded = get_expanded_rect_polygon(obs, safety_meters)
+    rect_pts = expanded  # 即安全矩形的四个角点
     if side == "left":
         p1, p2 = rect_pts[0], rect_pts[1]
         if math.hypot(p1[0]-A[0], p1[1]-A[1]) > math.hypot(p2[0]-A[0], p2[1]-A[1]):
@@ -196,6 +191,7 @@ def detour_single(A, B, obs, safety_meters, side="auto"):
         return best
 
 def sequential_detour(A, B, obstacles, flight_height, safety_meters, side="auto", max_iters=10):
+    relevant = [obs for obs in obstacles if flight_height < obs["height"]]
     current_route = [A, B]
     for _ in range(max_iters):
         new_route = [current_route[0]]
@@ -204,8 +200,8 @@ def sequential_detour(A, B, obstacles, flight_height, safety_meters, side="auto"
             seg_start = current_route[i]
             seg_end = current_route[i+1]
             target_obs = None
-            for obs in obstacles:
-                if flight_height < obs["height"] and polygon_intersects_segment(obs["vertices"], seg_start, seg_end):
+            for obs in relevant:
+                if segment_collides_with_obstacle(obs, safety_meters, seg_start, seg_end):
                     target_obs = obs
                     break
             if target_obs is None:
@@ -218,8 +214,8 @@ def sequential_detour(A, B, obstacles, flight_height, safety_meters, side="auto"
         if not conflict:
             ok = True
             for i in range(len(current_route)-1):
-                for obs in obstacles:
-                    if flight_height < obs["height"] and polygon_intersects_segment(obs["vertices"], current_route[i], current_route[i+1]):
+                for obs in relevant:
+                    if segment_collides_with_obstacle(obs, safety_meters, current_route[i], current_route[i+1]):
                         ok = False
                         break
                 if not ok:
@@ -228,6 +224,24 @@ def sequential_detour(A, B, obstacles, flight_height, safety_meters, side="auto"
                 return current_route
     return current_route
 
+def safe_smooth_route(route_points, obstacles, flight_height, safety_meters):
+    """平滑路径，并确保不侵入任何扩展安全区域（相交或点落入均退回）"""
+    if len(route_points) <= 2:
+        return route_points
+    smooth = catmull_rom_spline(route_points, num_segments=30)
+    relevant = [obs for obs in obstacles if flight_height < obs["height"]]
+    for i in range(len(smooth)-1):
+        for obs in relevant:
+            if segment_collides_with_obstacle(obs, safety_meters, smooth[i], smooth[i+1]):
+                return route_points
+    # 额外检查：平滑后的顶点是否在扩展矩形内部
+    for pt in smooth:
+        for obs in relevant:
+            expanded = get_expanded_rect_polygon(obs, safety_meters)
+            if polygon_intersects_segment(expanded, pt, pt):  # 点与多边形包含关系
+                return route_points
+    return smooth
+
 def generate_detour_route(A, B, obstacles, flight_height, safety_meters, detour_side="auto", max_attempts=3):
     relevant = [obs for obs in obstacles if flight_height < obs["height"]]
     if not relevant:
@@ -235,10 +249,11 @@ def generate_detour_route(A, B, obstacles, flight_height, safety_meters, detour_
     for attempt in range(max_attempts):
         current_safety = safety_meters * (1 + attempt * 0.5)
         route = sequential_detour(A, B, relevant, flight_height, current_safety, detour_side, max_iters=10)
+        # 最终验证
         ok = True
         for i in range(len(route)-1):
             for obs in relevant:
-                if polygon_intersects_segment(obs["vertices"], route[i], route[i+1]):
+                if segment_collides_with_obstacle(obs, current_safety, route[i], route[i+1]):
                     ok = False
                     break
             if not ok:
@@ -254,16 +269,19 @@ def optimal_detour_route(A, B, obstacles, flight_height, safety_meters, max_atte
         return [A, B]
     for attempt in range(max_attempts):
         current_safety = safety_meters * (1 + attempt * 0.5)
+        # 收集候选点：起点、终点、每个障碍物扩展矩形的四个顶点
         points = [A, B]
         for obs in relevant:
-            minx, miny, maxx, maxy = expand_bbox(obs, current_safety)
-            points.extend([(minx, miny), (minx, maxy), (maxx, maxy), (maxx, miny)])
+            for v in get_expanded_rect_polygon(obs, current_safety):
+                points.append(v)
+        # 去重
         unique = []
         for p in points:
             if not any(math.hypot(p[0]-q[0], p[1]-q[1]) < 1e-9 for q in unique):
                 unique.append(p)
         points = unique
         n = len(points)
+        # 构建邻接图（边不与任何扩展区域相交）
         graph = [[] for _ in range(n)]
         for i in range(n):
             for j in range(i+1, n):
@@ -271,13 +289,14 @@ def optimal_detour_route(A, B, obstacles, flight_height, safety_meters, max_atte
                 p2 = points[j]
                 safe = True
                 for obs in relevant:
-                    if polygon_intersects_segment(obs["vertices"], p1, p2):
+                    if segment_collides_with_obstacle(obs, current_safety, p1, p2):
                         safe = False
                         break
                 if safe:
                     dist = math.hypot(p2[0]-p1[0], p2[1]-p1[1])
                     graph[i].append((j, dist))
                     graph[j].append((i, dist))
+        # Dijkstra
         start_idx = points.index(A)
         end_idx = points.index(B)
         dist = [float('inf')] * n
@@ -327,7 +346,6 @@ def interpolate_pos(p1, p2, speed, elapsed):
 # ========== Streamlit 页面配置 ==========
 st.set_page_config(page_title="无人机地面站监控系统", layout="wide")
 
-# 初始化 session state
 if "app_version" not in st.session_state:
     st.session_state.sim = HeartbeatSimulator()
     st.session_state.history = []
@@ -338,8 +356,7 @@ if "app_version" not in st.session_state:
     st.session_state.detour_route = None
     st.session_state.detour_side = "auto"
     st.session_state.flash_message = None
-    st.session_state.app_version = "v35_safety_optimized"
-    # 飞行任务相关
+    st.session_state.app_version = "v36_safety_final"
     st.session_state.mission_waypoints = None
     st.session_state.mission_active = False
     st.session_state.mission_paused = False
