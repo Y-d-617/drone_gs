@@ -95,6 +95,7 @@ def polygon_intersects_segment(poly_vertices, seg_start, seg_end):
             x2, y2 = poly_vertices[(i+1)%n]
             if segments_intersect(seg_start[0], seg_start[1], seg_end[0], seg_end[1], x1, y1, x2, y2):
                 return True
+        # 点包含检测
         mid_x = (seg_start[0] + seg_end[0]) / 2
         mid_y = (seg_start[1] + seg_end[1]) / 2
         inside = False
@@ -138,7 +139,7 @@ def catmull_rom_spline(points, num_segments=30):
 
 # ========== 安全区域扩展（生成缓冲多边形） ==========
 def get_expanded_rect_polygon(obs, safety_meters):
-    """返回障碍物的安全扩展矩形四个顶点（逆时针），用于代替原障碍物进行碰撞检测"""
+    """根据障碍物bbox生成外扩安全距离的矩形（逆时针）"""
     minx, miny, maxx, maxy = get_bounding_box(obs["vertices"])
     center_lat = (miny + maxy) / 2.0
     meters_per_deg_lon = 111320.0 * math.cos(math.radians(center_lat))
@@ -155,7 +156,7 @@ def segment_collides_with_obstacle(obs, safety_meters, seg_start, seg_end):
     expanded = get_expanded_rect_polygon(obs, safety_meters)
     return polygon_intersects_segment(expanded, seg_start, seg_end)
 
-# ========== 顺序绕行函数（已升级为基于扩展矩形的碰撞检测） ==========
+# ========== 绕行单次处理 ==========
 def detour_single(A, B, obs, safety_meters, side="auto"):
     expanded = get_expanded_rect_polygon(obs, safety_meters)
     rect_pts = expanded
@@ -206,6 +207,7 @@ def sequential_detour(A, B, obstacles, flight_height, safety_meters, side="auto"
                 new_route.extend(seg_detour[1:])
         current_route = new_route
         if not conflict:
+            # 最终验证
             ok = True
             for i in range(len(current_route)-1):
                 for obs in relevant:
@@ -216,25 +218,21 @@ def sequential_detour(A, B, obstacles, flight_height, safety_meters, side="auto"
                     break
             if ok:
                 return current_route
-    return current_route
+    return current_route  # 即使不完全安全也返回，后续会处理
 
-# ========== 路径简化（减少航点） ==========
+# ========== 路径简化（贪心可见性） ==========
 def simplify_route(route, obstacles, flight_height, safety_meters):
-    """贪心可见性简化：保留起点和终点，尽量跳过中间点"""
     relevant = [obs for obs in obstacles if flight_height < obs["height"]]
     if len(route) <= 2:
         return route
     simplified = [route[0]]
     current_idx = 0
     while current_idx < len(route)-1:
-        # 寻找从当前点可以直接到达的最远点
         furthest = current_idx + 1
         for j in range(len(route)-1, current_idx, -1):
-            seg_start = route[current_idx]
-            seg_end = route[j]
             safe = True
             for obs in relevant:
-                if segment_collides_with_obstacle(obs, safety_meters, seg_start, seg_end):
+                if segment_collides_with_obstacle(obs, safety_meters, route[current_idx], route[j]):
                     safe = False
                     break
             if safe:
@@ -244,26 +242,24 @@ def simplify_route(route, obstacles, flight_height, safety_meters):
         current_idx = furthest
     return simplified
 
-# ========== 安全平滑（含扩展区域检查） ==========
+# ========== 安全平滑 ==========
 def safe_smooth_route(route_points, obstacles, flight_height, safety_meters):
     if len(route_points) <= 2:
         return route_points
     smooth = catmull_rom_spline(route_points, num_segments=30)
     relevant = [obs for obs in obstacles if flight_height < obs["height"]]
-    # 检查平滑线段是否与扩展区域相交
     for i in range(len(smooth)-1):
         for obs in relevant:
             if segment_collides_with_obstacle(obs, safety_meters, smooth[i], smooth[i+1]):
                 return route_points
-    # 检查平滑点是否落入扩展矩形内部
     for pt in smooth:
         for obs in relevant:
             expanded = get_expanded_rect_polygon(obs, safety_meters)
-            if polygon_intersects_segment(expanded, pt, pt):  # 点包含判断
+            if polygon_intersects_segment(expanded, pt, pt):
                 return route_points
     return smooth
 
-# ========== 生成绕行路径（含简化） ==========
+# ========== 生成绕行路径（自动重试） ==========
 def generate_detour_route(A, B, obstacles, flight_height, safety_meters, detour_side="auto", max_attempts=3):
     relevant = [obs for obs in obstacles if flight_height < obs["height"]]
     if not relevant:
@@ -281,11 +277,10 @@ def generate_detour_route(A, B, obstacles, flight_height, safety_meters, detour_
             if not ok:
                 break
         if ok:
-            # 简化路径
             simplified = simplify_route(route, obstacles, flight_height, current_safety)
             return safe_smooth_route(simplified, obstacles, flight_height, current_safety)
-    st.warning("⚠️ 无法找到完全避障路径，请增加安全距离或调整障碍物位置")
-    return [A, B]
+    st.error("❌ 所有尝试均失败，请增大安全距离或调整障碍物位置")
+    return [A, B]  # 返回原始直线，但提示用户
 
 def optimal_detour_route(A, B, obstacles, flight_height, safety_meters, max_attempts=3):
     relevant = [obs for obs in obstacles if flight_height < obs["height"]]
@@ -293,6 +288,7 @@ def optimal_detour_route(A, B, obstacles, flight_height, safety_meters, max_atte
         return [A, B]
     for attempt in range(max_attempts):
         current_safety = safety_meters * (1 + attempt * 0.5)
+        # 收集候选点
         points = [A, B]
         for obs in relevant:
             for v in get_expanded_rect_polygon(obs, current_safety):
@@ -303,18 +299,17 @@ def optimal_detour_route(A, B, obstacles, flight_height, safety_meters, max_atte
                 unique.append(p)
         points = unique
         n = len(points)
+        # 构建邻接图
         graph = [[] for _ in range(n)]
         for i in range(n):
             for j in range(i+1, n):
-                p1 = points[i]
-                p2 = points[j]
                 safe = True
                 for obs in relevant:
-                    if segment_collides_with_obstacle(obs, current_safety, p1, p2):
+                    if segment_collides_with_obstacle(obs, current_safety, points[i], points[j]):
                         safe = False
                         break
                 if safe:
-                    dist = math.hypot(p2[0]-p1[0], p2[1]-p1[1])
+                    dist = math.hypot(points[j][0]-points[i][0], points[j][1]-points[i][1])
                     graph[i].append((j, dist))
                     graph[j].append((i, dist))
         start_idx = points.index(A)
@@ -342,7 +337,7 @@ def optimal_detour_route(A, B, obstacles, flight_height, safety_meters, max_atte
             path_pts = [points[i] for i in path_idx]
             simplified = simplify_route(path_pts, obstacles, flight_height, current_safety)
             return safe_smooth_route(simplified, obstacles, flight_height, current_safety)
-    st.warning("⚠️ 最优路径搜索失败，请增加安全距离或调整障碍物")
+    st.error("❌ 最优路径搜索失败，请调整参数")
     return [A, B]
 
 # ========== 飞行模拟辅助函数 ==========
@@ -377,7 +372,7 @@ if "app_version" not in st.session_state:
     st.session_state.detour_route = None
     st.session_state.detour_side = "auto"
     st.session_state.flash_message = None
-    st.session_state.app_version = "v35_simplified"
+    st.session_state.app_version = "v36_robust"
     st.session_state.mission_waypoints = None
     st.session_state.mission_active = False
     st.session_state.mission_paused = False
