@@ -10,7 +10,6 @@ import json
 import os
 import heapq
 import random
-import matplotlib.pyplot as plt
 
 # ========== 障碍物持久化 ==========
 OBSTACLE_FILE = "obstacles.json"
@@ -360,135 +359,11 @@ def interpolate_pos(p1, p2, speed, elapsed):
     lat = p1[1] + (p2[1] - p1[1]) * t
     return (lng, lat)
 
-# ========== 增强的心跳模拟器（支持上下行链路） ==========
-class AdvancedHeartbeatSimulator:
-    def __init__(self, base_rtt=0.05, jitter=0.02, loss_rate=0.02):
-        self.base_rtt = base_rtt
-        self.jitter = jitter
-        self.loss_rate = loss_rate
-        self.history = []  # 存储最近的RTT记录
-        self.up_packets_sent = 0
-        self.up_packets_received = 0
-        self.down_packets_sent = 0
-        self.down_packets_received = 0
-        self.start_time = time.time()
-        self.last_packet_time = None
-        self.history_packets = []  # 存储完整数据包记录
-
-    def generate_packet(self, direction="uplink"):
-        """direction: 'uplink' (FCU->GCS) 或 'downlink' (GCS->FCU)"""
-        now = time.time()
-        rtt = self.base_rtt + random.uniform(-self.jitter, self.jitter)
-        rtt = max(0.01, rtt)
-        is_timeout = random.random() < self.loss_rate
-        if direction == "uplink":
-            self.up_packets_sent += 1
-            if not is_timeout:
-                self.up_packets_received += 1
-            data_size = random.randint(50, 200)  # bytes
-        else:
-            self.down_packets_sent += 1
-            if not is_timeout:
-                self.down_packets_received += 1
-            data_size = random.randint(20, 100)  # bytes
-        self.history.append(rtt if not is_timeout else 0)
-        if len(self.history) > 100:
-            self.history.pop(0)
-        self.last_packet_time = now
-        return {
-            "direction": direction,
-            "rtt": rtt if not is_timeout else None,
-            "is_timeout": is_timeout,
-            "data_size": data_size,
-            "timestamp": now
-        }
-
-    def get_link_stats(self):
-        avg_rtt = sum(self.history) / len(self.history) if self.history else 0
-        loss_rate_uplink = 1 - (self.up_packets_received / max(1, self.up_packets_sent))
-        loss_rate_downlink = 1 - (self.down_packets_received / max(1, self.down_packets_sent))
-        # 计算瞬时数据速率 (最近5秒)
-        now = time.time()
-        recent_uplink = [p for p in self.history_packets if p.get("direction")=="uplink" and now - p["timestamp"] <= 5]
-        recent_downlink = [p for p in self.history_packets if p.get("direction")=="downlink" and now - p["timestamp"] <= 5]
-        uplink_rate = sum(p["data_size"] for p in recent_uplink) / 5.0  # bytes/s
-        downlink_rate = sum(p["data_size"] for p in recent_downlink) / 5.0
-        return {
-            "avg_rtt": avg_rtt,
-            "loss_rate_uplink": loss_rate_uplink,
-            "loss_rate_downlink": loss_rate_downlink,
-            "uplink_rate": uplink_rate,
-            "downlink_rate": downlink_rate
-        }
-
-    def generate_packet_and_record(self):
-        direction = random.choice(["uplink", "downlink"])
-        packet = self.generate_packet(direction)
-        self.history_packets.append(packet)
-        if len(self.history_packets) > 500:
-            self.history_packets.pop(0)
-        return packet
-
-# ========== 通信拓扑图绘制（纯 matplotlib，无 networkx） ==========
-def draw_communication_topology(link_stats):
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.set_xlim(0, 10)
-    ax.set_ylim(0, 6)
-    ax.axis('off')
-    
-    # 节点位置 (x, y)
-    nodes = {
-        "GCS": (2, 3),
-        "OBC": (5, 3),
-        "FCU": (8, 3)
-    }
-    node_desc = {
-        "GCS": "地面站",
-        "OBC": "机载计算机",
-        "FCU": "飞行控制单元"
-    }
-    # 绘制节点
-    for name, (x, y) in nodes.items():
-        color = 'green' if name == 'GCS' else ('blue' if name == 'OBC' else 'red')
-        circle = plt.Circle((x, y), 0.5, color=color, ec='black', lw=2, zorder=2)
-        ax.add_patch(circle)
-        ax.text(x, y, f"{name}\n{node_desc[name]}", ha='center', va='center', fontsize=9, weight='bold', zorder=3)
-    
-    # 上行链路 (FCU -> OBC -> GCS) 蓝色实线
-    ax.annotate("", xy=nodes["OBC"], xytext=nodes["FCU"],
-                arrowprops=dict(arrowstyle='->', color='blue', lw=2, shrinkA=8, shrinkB=8))
-    ax.annotate("", xy=nodes["GCS"], xytext=nodes["OBC"],
-                arrowprops=dict(arrowstyle='->', color='blue', lw=2, shrinkA=8, shrinkB=8))
-    # 下行链路 (GCS -> OBC -> FCU) 橙色虚线
-    ax.annotate("", xy=nodes["OBC"], xytext=nodes["GCS"],
-                arrowprops=dict(arrowstyle='->', color='orange', lw=2, linestyle='dashed', shrinkA=8, shrinkB=8))
-    ax.annotate("", xy=nodes["FCU"], xytext=nodes["OBC"],
-                arrowprops=dict(arrowstyle='->', color='orange', lw=2, linestyle='dashed', shrinkA=8, shrinkB=8))
-    
-    # 边标签
-    ax.text((nodes["FCU"][0]+nodes["OBC"][0])/2, (nodes["FCU"][1]+nodes["OBC"][1])/2+0.3,
-            "遥测 (↑)", ha='center', fontsize=8, color='blue')
-    ax.text((nodes["OBC"][0]+nodes["GCS"][0])/2, (nodes["OBC"][1]+nodes["GCS"][1])/2+0.3,
-            "遥测 (↑)", ha='center', fontsize=8, color='blue')
-    ax.text((nodes["GCS"][0]+nodes["OBC"][0])/2, (nodes["GCS"][1]+nodes["OBC"][1])/2-0.3,
-            "指令 (↓)", ha='center', fontsize=8, color='orange')
-    ax.text((nodes["OBC"][0]+nodes["FCU"][0])/2, (nodes["OBC"][1]+nodes["FCU"][1])/2-0.3,
-            "指令 (↓)", ha='center', fontsize=8, color='orange')
-    
-    # 底部统计数据
-    stats_text = (f"上行 (FCU→GCS): RTT={link_stats['avg_rtt']*1000:.1f}ms, 丢包率={link_stats['loss_rate_uplink']*100:.1f}%\n"
-                  f"下行 (GCS→FCU): 丢包率={link_stats['loss_rate_downlink']*100:.1f}%\n"
-                  f"数据速率: 上行 {link_stats['uplink_rate']:.1f} B/s, 下行 {link_stats['downlink_rate']:.1f} B/s")
-    ax.text(5, -0.5, stats_text, ha='center', va='top', fontsize=9,
-            bbox=dict(facecolor='white', alpha=0.8, boxstyle='round,pad=0.3'))
-    plt.tight_layout()
-    return fig
-
 # ========== Streamlit 页面配置 ==========
 st.set_page_config(page_title="无人机地面站监控系统", layout="wide")
 
 if "app_version" not in st.session_state:
-    st.session_state.sim = AdvancedHeartbeatSimulator()
+    st.session_state.sim = HeartbeatSimulator()
     st.session_state.history = []
     loaded = load_obstacles_from_file()
     st.session_state.obstacles = loaded if loaded else []
@@ -497,7 +372,7 @@ if "app_version" not in st.session_state:
     st.session_state.detour_route = None
     st.session_state.detour_side = "auto"
     st.session_state.flash_message = None
-    st.session_state.app_version = "v37_topology_nonetworkx"
+    st.session_state.app_version = "v36_robust"
     st.session_state.mission_waypoints = None
     st.session_state.mission_active = False
     st.session_state.mission_paused = False
@@ -507,13 +382,6 @@ if "app_version" not in st.session_state:
     st.session_state.flight_speed = 8.5
     st.session_state.battery = 96.0
     st.session_state.stop_mission = False
-    st.session_state.link_stats = {
-        "avg_rtt": 0.05,
-        "loss_rate_uplink": 0.0,
-        "loss_rate_downlink": 0.0,
-        "uplink_rate": 0.0,
-        "downlink_rate": 0.0
-    }
 else:
     if st.session_state.obstacles and isinstance(st.session_state.obstacles[0], list):
         new_obs = []
@@ -522,20 +390,12 @@ else:
         st.session_state.obstacles = new_obs
         save_obstacles_to_file(st.session_state.obstacles)
     for key in ["mission_waypoints", "mission_active", "mission_paused", "mission_start_time",
-                "current_waypoint_index", "aircraft_position", "flight_speed", "battery", "stop_mission", "link_stats"]:
+                "current_waypoint_index", "aircraft_position", "flight_speed", "battery", "stop_mission"]:
         if key not in st.session_state:
             if key == "flight_speed":
                 st.session_state.flight_speed = 8.5
             elif key == "battery":
                 st.session_state.battery = 96.0
-            elif key == "link_stats":
-                st.session_state.link_stats = {
-                    "avg_rtt": 0.05,
-                    "loss_rate_uplink": 0.0,
-                    "loss_rate_downlink": 0.0,
-                    "uplink_rate": 0.0,
-                    "downlink_rate": 0.0
-                }
             else:
                 st.session_state[key] = None if key not in ["mission_active", "mission_paused", "stop_mission"] else False
 
@@ -807,11 +667,6 @@ elif page == "飞行监控":
     waypoints = st.session_state.mission_waypoints
     route = waypoints
 
-    # 更新链路统计数据（每帧生成一个包）
-    packet = st.session_state.sim.generate_packet_and_record()
-    stats = st.session_state.sim.get_link_stats()
-    st.session_state.link_stats = stats
-
     col_ctrl1, col_ctrl2, col_ctrl3, col_ctrl4 = st.columns(4)
     with col_ctrl1:
         if st.button("▶️ 开始任务", disabled=st.session_state.mission_active, key="btn_start_mon"):
@@ -887,33 +742,6 @@ elif page == "飞行监控":
         elapsed_time = time.time() - st.session_state.mission_start_time + (wp_idx * 30)
     eta = dist_remaining / st.session_state.flight_speed if st.session_state.flight_speed > 0 else 0.0
 
-    # ========== 通信链路拓扑与数据流展示 ==========
-    with st.expander("📡 通信链路拓扑与数据流", expanded=True):
-        col_top1, col_top2 = st.columns([1, 1])
-        with col_top1:
-            fig = draw_communication_topology(st.session_state.link_stats)
-            st.pyplot(fig)
-            plt.close(fig)
-        with col_top2:
-            st.subheader("链路质量指标")
-            stats = st.session_state.link_stats
-            col_q1, col_q2 = st.columns(2)
-            with col_q1:
-                st.metric("平均 RTT", f"{stats['avg_rtt']*1000:.1f} ms")
-                st.metric("上行丢包率", f"{stats['loss_rate_uplink']*100:.1f}%")
-                st.metric("上行数据速率", f"{stats['uplink_rate']:.1f} B/s")
-            with col_q2:
-                st.metric("下行丢包率", f"{stats['loss_rate_downlink']*100:.1f}%")
-                st.metric("下行数据速率", f"{stats['downlink_rate']:.1f} B/s")
-                st.write("**节点状态**")
-                st.success("✅ GCS 在线")
-                st.success("✅ OBC 在线")
-                st.success("✅ FCU 在线")
-            if hasattr(st.session_state.sim, "history_packets") and len(st.session_state.sim.history_packets) > 0:
-                last_pkt = st.session_state.sim.history_packets[-1]
-                st.caption(f"最新数据包: {last_pkt['direction']} | 大小 {last_pkt['data_size']} B | {'超时' if last_pkt['is_timeout'] else f'RTT {last_pkt['rtt']*1000:.1f}ms'}")
-
-    # 原有的飞行数据与地图
     col_gauges, col_map = st.columns([1, 2])
     with col_gauges:
         st.subheader("📊 飞行数据")
@@ -925,6 +753,18 @@ elif page == "飞行监控":
         mins_e, secs_e = divmod(int(eta), 60) if eta else (0,0)
         st.metric("预计到达", f"{mins_e:02d}:{secs_e:02d}")
         st.metric("电量模拟", f"{st.session_state.battery:.1f}%")
+        st.subheader("📡 通信链路")
+        cols = st.columns(3)
+        cols[0].success("GCS 在线")
+        cols[1].success("OBC 在线")
+        cols[2].success("FCU 在线")
+        if st.session_state.sim:
+            packet = st.session_state.sim.generate_packet()
+            st.session_state.history.append(packet)
+            avg_rtt, loss_rate = st.session_state.sim.get_summary(st.session_state.history)
+            st.caption(f"RTT: {packet['rtt']:.3f}s | 丢包率: {loss_rate:.1f}%")
+            if packet['is_timeout']:
+                st.error("通信超时！")
 
     with col_map:
         center_lat = pos[1]
