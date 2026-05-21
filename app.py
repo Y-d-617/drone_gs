@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import time
@@ -10,10 +11,7 @@ import json
 import os
 import heapq
 import random
-import networkx as nx
 import matplotlib.pyplot as plt
-from collections import deque
-import threading
 
 # ========== 障碍物持久化 ==========
 OBSTACLE_FILE = "obstacles.json"
@@ -376,6 +374,7 @@ class AdvancedHeartbeatSimulator:
         self.down_packets_received = 0
         self.start_time = time.time()
         self.last_packet_time = None
+        self.history_packets = []  # 存储完整数据包记录
 
     def generate_packet(self, direction="uplink"):
         """direction: 'uplink' (FCU->GCS) 或 'downlink' (GCS->FCU)"""
@@ -387,14 +386,13 @@ class AdvancedHeartbeatSimulator:
             self.up_packets_sent += 1
             if not is_timeout:
                 self.up_packets_received += 1
-            # 遥测数据包大小模拟
             data_size = random.randint(50, 200)  # bytes
         else:
             self.down_packets_sent += 1
             if not is_timeout:
                 self.down_packets_received += 1
             data_size = random.randint(20, 100)  # bytes
-        self.history.append(rtt)
+        self.history.append(rtt if not is_timeout else 0)
         if len(self.history) > 100:
             self.history.pop(0)
         self.last_packet_time = now
@@ -424,73 +422,68 @@ class AdvancedHeartbeatSimulator:
             "downlink_rate": downlink_rate
         }
 
-    # 为了保留原有接口兼容，但需要记录所有packet
     def generate_packet_and_record(self):
-        # 随机选择上行或下行
         direction = random.choice(["uplink", "downlink"])
         packet = self.generate_packet(direction)
-        if not hasattr(self, "history_packets"):
-            self.history_packets = []
         self.history_packets.append(packet)
         if len(self.history_packets) > 500:
             self.history_packets.pop(0)
         return packet
 
-# ========== 通信拓扑图绘制 ==========
+# ========== 通信拓扑图绘制（纯 matplotlib，无 networkx） ==========
 def draw_communication_topology(link_stats):
-    G = nx.DiGraph()
-    # 添加节点
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.set_xlim(0, 10)
+    ax.set_ylim(0, 6)
+    ax.axis('off')
+    
+    # 节点位置 (x, y)
     nodes = {
-        "GCS": {"color": "green", "size": 2000, "desc": "地面站"},
-        "OBC": {"color": "blue", "size": 2000, "desc": "机载计算机"},
-        "FCU": {"color": "red", "size": 2000, "desc": "飞行控制单元"}
+        "GCS": (2, 3),
+        "OBC": (5, 3),
+        "FCU": (8, 3)
     }
-    for node, attrs in nodes.items():
-        G.add_node(node, **attrs)
-
-    # 添加边及标签
-    # 上行链路 (FCU -> OBC -> GCS)
-    G.add_edge("FCU", "OBC", label="遥测原始数据", color="blue")
-    G.add_edge("OBC", "GCS", label="转发遥测", color="blue")
-    # 下行链路 (GCS -> OBC -> FCU)
-    G.add_edge("GCS", "OBC", label="控制指令", color="orange")
-    G.add_edge("OBC", "FCU", label="执行指令", color="orange")
-
-    pos = nx.spring_layout(G, seed=42, k=1.5)
-    plt.figure(figsize=(6, 4))
+    node_desc = {
+        "GCS": "地面站",
+        "OBC": "机载计算机",
+        "FCU": "飞行控制单元"
+    }
     # 绘制节点
-    for node in G.nodes:
-        color = G.nodes[node]["color"]
-        size = G.nodes[node]["size"]
-        nx.draw_networkx_nodes(G, pos, nodelist=[node], node_color=color, node_size=size)
-    # 绘制边，根据方向分别设置颜色
-    for edge in G.edges:
-        u, v = edge
-        # 判断边的类型
-        if (u, v) in [("FCU","OBC"), ("OBC","GCS")]:
-            edge_color = "blue"
-            style = "solid"
-        else:
-            edge_color = "orange"
-            style = "dashed"
-        nx.draw_networkx_edges(G, pos, edgelist=[edge], edge_color=edge_color, style=style, width=2, arrowstyle='->', arrowsize=15)
-    # 绘制标签
-    labels = {node: f"{node}\n{nodes[node]['desc']}" for node in G.nodes}
-    nx.draw_networkx_labels(G, pos, labels, font_size=10, font_weight="bold")
-    # 添加边标签
-    edge_labels = {("FCU","OBC"): "遥测 (↑)", ("OBC","GCS"): "遥测 (↑)", ("GCS","OBC"): "指令 (↓)", ("OBC","FCU"): "指令 (↓)"}
-    nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=8)
-
-    # 在图下方添加链路质量文字
-    stats_text = f"""
-    上行 (FCU→GCS): RTT={link_stats['avg_rtt']*1000:.1f}ms, 丢包率={link_stats['loss_rate_uplink']*100:.1f}%
-    下行 (GCS→FCU): 丢包率={link_stats['loss_rate_downlink']*100:.1f}%
-    数据速率: 上行 {link_stats['uplink_rate']:.1f} B/s, 下行 {link_stats['downlink_rate']:.1f} B/s
-    """
-    plt.figtext(0.5, 0.01, stats_text, wrap=True, horizontalalignment='center', fontsize=9, bbox=dict(facecolor='white', alpha=0.8))
-    plt.axis("off")
+    for name, (x, y) in nodes.items():
+        color = 'green' if name == 'GCS' else ('blue' if name == 'OBC' else 'red')
+        circle = plt.Circle((x, y), 0.5, color=color, ec='black', lw=2, zorder=2)
+        ax.add_patch(circle)
+        ax.text(x, y, f"{name}\n{node_desc[name]}", ha='center', va='center', fontsize=9, weight='bold', zorder=3)
+    
+    # 上行链路 (FCU -> OBC -> GCS) 蓝色实线
+    ax.annotate("", xy=nodes["OBC"], xytext=nodes["FCU"],
+                arrowprops=dict(arrowstyle='->', color='blue', lw=2, shrinkA=8, shrinkB=8))
+    ax.annotate("", xy=nodes["GCS"], xytext=nodes["OBC"],
+                arrowprops=dict(arrowstyle='->', color='blue', lw=2, shrinkA=8, shrinkB=8))
+    # 下行链路 (GCS -> OBC -> FCU) 橙色虚线
+    ax.annotate("", xy=nodes["OBC"], xytext=nodes["GCS"],
+                arrowprops=dict(arrowstyle='->', color='orange', lw=2, linestyle='dashed', shrinkA=8, shrinkB=8))
+    ax.annotate("", xy=nodes["FCU"], xytext=nodes["OBC"],
+                arrowprops=dict(arrowstyle='->', color='orange', lw=2, linestyle='dashed', shrinkA=8, shrinkB=8))
+    
+    # 边标签
+    ax.text((nodes["FCU"][0]+nodes["OBC"][0])/2, (nodes["FCU"][1]+nodes["OBC"][1])/2+0.3,
+            "遥测 (↑)", ha='center', fontsize=8, color='blue')
+    ax.text((nodes["OBC"][0]+nodes["GCS"][0])/2, (nodes["OBC"][1]+nodes["GCS"][1])/2+0.3,
+            "遥测 (↑)", ha='center', fontsize=8, color='blue')
+    ax.text((nodes["GCS"][0]+nodes["OBC"][0])/2, (nodes["GCS"][1]+nodes["OBC"][1])/2-0.3,
+            "指令 (↓)", ha='center', fontsize=8, color='orange')
+    ax.text((nodes["OBC"][0]+nodes["FCU"][0])/2, (nodes["OBC"][1]+nodes["FCU"][1])/2-0.3,
+            "指令 (↓)", ha='center', fontsize=8, color='orange')
+    
+    # 底部统计数据
+    stats_text = (f"上行 (FCU→GCS): RTT={link_stats['avg_rtt']*1000:.1f}ms, 丢包率={link_stats['loss_rate_uplink']*100:.1f}%\n"
+                  f"下行 (GCS→FCU): 丢包率={link_stats['loss_rate_downlink']*100:.1f}%\n"
+                  f"数据速率: 上行 {link_stats['uplink_rate']:.1f} B/s, 下行 {link_stats['downlink_rate']:.1f} B/s")
+    ax.text(5, -0.5, stats_text, ha='center', va='top', fontsize=9,
+            bbox=dict(facecolor='white', alpha=0.8, boxstyle='round,pad=0.3'))
     plt.tight_layout()
-    return plt
+    return fig
 
 # ========== Streamlit 页面配置 ==========
 st.set_page_config(page_title="无人机地面站监控系统", layout="wide")
@@ -505,7 +498,7 @@ if "app_version" not in st.session_state:
     st.session_state.detour_route = None
     st.session_state.detour_side = "auto"
     st.session_state.flash_message = None
-    st.session_state.app_version = "v37_topology"
+    st.session_state.app_version = "v37_topology_nonetworkx"
     st.session_state.mission_waypoints = None
     st.session_state.mission_active = False
     st.session_state.mission_paused = False
@@ -515,7 +508,6 @@ if "app_version" not in st.session_state:
     st.session_state.flight_speed = 8.5
     st.session_state.battery = 96.0
     st.session_state.stop_mission = False
-    # 新增链路状态变量
     st.session_state.link_stats = {
         "avg_rtt": 0.05,
         "loss_rate_uplink": 0.0,
@@ -896,11 +888,10 @@ elif page == "飞行监控":
         elapsed_time = time.time() - st.session_state.mission_start_time + (wp_idx * 30)
     eta = dist_remaining / st.session_state.flight_speed if st.session_state.flight_speed > 0 else 0.0
 
-    # ========== 新增：通信链路拓扑与数据流展示 ==========
+    # ========== 通信链路拓扑与数据流展示 ==========
     with st.expander("📡 通信链路拓扑与数据流", expanded=True):
         col_top1, col_top2 = st.columns([1, 1])
         with col_top1:
-            # 绘制拓扑图
             fig = draw_communication_topology(st.session_state.link_stats)
             st.pyplot(fig)
             plt.close(fig)
@@ -915,12 +906,10 @@ elif page == "飞行监控":
             with col_q2:
                 st.metric("下行丢包率", f"{stats['loss_rate_downlink']*100:.1f}%")
                 st.metric("下行数据速率", f"{stats['downlink_rate']:.1f} B/s")
-                # 节点状态指示
                 st.write("**节点状态**")
                 st.success("✅ GCS 在线")
                 st.success("✅ OBC 在线")
                 st.success("✅ FCU 在线")
-            # 显示最近的数据包
             if hasattr(st.session_state.sim, "history_packets") and len(st.session_state.sim.history_packets) > 0:
                 last_pkt = st.session_state.sim.history_packets[-1]
                 st.caption(f"最新数据包: {last_pkt['direction']} | 大小 {last_pkt['data_size']} B | {'超时' if last_pkt['is_timeout'] else f'RTT {last_pkt['rtt']*1000:.1f}ms'}")
