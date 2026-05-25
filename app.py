@@ -772,7 +772,12 @@ elif page == "飞行监控":
         st.session_state.hist_gcs_obc.append(packet_gobc)
         if len(st.session_state.hist_gcs_obc) > 100:
             st.session_state.hist_gcs_obc.pop(0)
-        avg_rtt_gobc, loss_gobc = st.session_state.sim_gcs_obc.get_summary(st.session_state.hist_gcs_obc)
+        # 手动计算平均RTT和丢包率（不依赖 heartbeat_sim 的方法）
+        rtts = [p['rtt'] for p in st.session_state.hist_gcs_obc if not p.get('is_timeout', False)]
+        avg_rtt_gobc = sum(rtts) / len(rtts) if rtts else 0.0
+        total_gobc = len(st.session_state.hist_gcs_obc)
+        lost_gobc = sum(1 for p in st.session_state.hist_gcs_obc if p.get('is_timeout', False))
+        loss_gobc = lost_gobc / total_gobc if total_gobc > 0 else 0.0
         st.session_state.link_stats["GCS-OBC"]["delay_ms"] = avg_rtt_gobc * 1000
         st.session_state.link_stats["GCS-OBC"]["loss_rate"] = loss_gobc
         st.session_state.link_stats["GCS-OBC"]["last_heartbeat"] = time.time()
@@ -785,7 +790,11 @@ elif page == "飞行监控":
         st.session_state.hist_obc_fcu.append(packet_ofcu)
         if len(st.session_state.hist_obc_fcu) > 100:
             st.session_state.hist_obc_fcu.pop(0)
-        avg_rtt_ofcu, loss_ofcu = st.session_state.sim_obc_fcu.get_summary(st.session_state.hist_obc_fcu)
+        rtts = [p['rtt'] for p in st.session_state.hist_obc_fcu if not p.get('is_timeout', False)]
+        avg_rtt_ofcu = sum(rtts) / len(rtts) if rtts else 0.0
+        total_ofcu = len(st.session_state.hist_obc_fcu)
+        lost_ofcu = sum(1 for p in st.session_state.hist_obc_fcu if p.get('is_timeout', False))
+        loss_ofcu = lost_ofcu / total_ofcu if total_ofcu > 0 else 0.0
         st.session_state.link_stats["OBC-FCU"]["delay_ms"] = avg_rtt_ofcu * 1000
         st.session_state.link_stats["OBC-FCU"]["loss_rate"] = loss_ofcu
         st.session_state.link_stats["OBC-FCU"]["last_heartbeat"] = time.time()
@@ -865,13 +874,18 @@ elif page == "飞行监控":
                 st.session_state.history.append(packet)
                 plot_df = pd.DataFrame(st.session_state.history[-20:])
                 with placeholder.container():
-                    avg_rtt, loss_rate = st.session_state.sim.get_summary(st.session_state.history)
+                    # 手动计算平均RTT和丢包率
+                    rtts = [p['rtt'] for p in st.session_state.history if not p.get('is_timeout', False)]
+                    avg_rtt = sum(rtts) / len(rtts) if rtts else 0.0
+                    total = len(st.session_state.history)
+                    lost = sum(1 for p in st.session_state.history if p.get('is_timeout', False))
+                    loss_rate = lost / total if total > 0 else 0.0
                     col_r1, col_r2, col_r3 = st.columns(3)
                     col_r1.metric("实时 RTT", f"{packet['rtt']:.3f}s", delta=packet['status'], delta_color="inverse")
                     col_r2.metric("平均 RTT", f"{avg_rtt:.3f}s")
-                    col_r3.metric("累计丢包率", f"{loss_rate:.1f}%")
+                    col_r3.metric("累计丢包率", f"{loss_rate*100:.1f}%")
                     st.line_chart(plot_df.set_index("time")["rtt"])
-                    if packet['is_timeout']:
+                    if packet.get('is_timeout', False):
                         st.error(f"警报：北京时间 {packet['time']} 发生通讯超时！")
                 time.sleep(0.4)
         else:
