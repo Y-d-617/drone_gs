@@ -1,5 +1,3 @@
-以下是您所需的无人机地面站监控系统的完整代码。它基于您原有的代码，新增了**通信日志**功能，能够完整记录航线规划、导航目标、航点到达及任务完成等事件，与飞行任务执行过程实时联动。
-```python
 import streamlit as st
 import pandas as pd
 import time
@@ -1035,4 +1033,3 @@ elif page == "飞行监控":
     # 显示通信日志
     st.divider()
     render_communication_log()
-```
