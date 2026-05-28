@@ -297,7 +297,7 @@ def optimal_detour_route(A, B, obstacles, flight_height, safety_meters, max_atte
     st.warning("⚠️ 最优路径搜索失败，请增加安全距离或调整障碍物")
     return [A, B]
 
-# ========== 通信日志辅助函数（优化样式）==========
+# ========== 通信日志辅助函数（美化版）==========
 def add_communication_log(message, direction="OBC 内部", show_time=True):
     """添加一条通信日志，direction可选: GCS → OBC, OBC 内部, FCU → OBC → GCS"""
     if "communication_log" not in st.session_state:
@@ -318,72 +318,105 @@ def clear_communication_log():
         st.session_state.communication_log = []
 
 def render_communication_log():
-    """渲染通信日志，采用图片中的样式：时间、内容、方向分段显示，方向以“- 方向”形式单独一行"""
+    """渲染通信日志，采用卡片式美化样式"""
     st.markdown("### 📋 通信日志")
     if "communication_log" not in st.session_state or not st.session_state.communication_log:
         st.info("暂无通信记录")
         return
-    
-    col_clear, _ = st.columns([1, 5])
+
+    col_clear, col_stats = st.columns([1, 4])
     with col_clear:
         if st.button("🗑️ 清空日志", key="clear_log_btn", use_container_width=True):
             clear_communication_log()
             st.rerun()
-    
-    # 自定义CSS让每条日志更清晰
+    with col_stats:
+        st.caption(f"共 {len(st.session_state.communication_log)} 条记录，仅显示最近50条")
+
+    # 美化用的CSS
     st.markdown("""
     <style>
-    .log-entry {
-        border-left: 3px solid #ccc;
-        padding: 8px 12px;
-        margin-bottom: 12px;
-        background-color: #f9f9f9;
-        border-radius: 6px;
-        font-family: monospace;
+    .comm-log-card {
+        border-left: 5px solid;
+        border-radius: 12px;
+        padding: 12px 16px;
+        margin-bottom: 14px;
+        background: linear-gradient(135deg, #ffffff 0%, #f8f9fc 100%);
+        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        transition: all 0.2s ease;
+        font-family: 'Segoe UI', 'Roboto', monospace;
     }
-    .log-time {
-        font-size: 0.85em;
-        color: #666;
-        font-weight: bold;
+    .comm-log-card:hover {
+        transform: translateX(3px);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        background: #ffffff;
     }
-    .log-message {
-        margin: 6px 0;
-        font-size: 0.95em;
+    .comm-log-time {
+        font-size: 0.8rem;
+        color: #6c757d;
+        font-weight: 500;
+        letter-spacing: 0.3px;
+        margin-bottom: 6px;
+        font-family: 'Courier New', monospace;
     }
-    .log-direction {
-        font-size: 0.85em;
-        color: #2c3e50;
-        margin-top: 4px;
-        font-style: italic;
+    .comm-log-message {
+        font-size: 1rem;
+        font-weight: 500;
+        color: #1e2a3a;
+        margin: 8px 0 6px 0;
+        word-break: break-word;
     }
-    .dir-gcs-obc { border-left-color: #3498db; }
-    .dir-obc { border-left-color: #95a5a6; }
-    .dir-fcu { border-left-color: #2ecc71; }
+    .comm-log-direction {
+        display: flex;
+        justify-content: flex-end;
+        align-items: center;
+        gap: 6px;
+        margin-top: 8px;
+        font-size: 0.75rem;
+        color: #4a627a;
+        border-top: 1px dashed #e2e8f0;
+        padding-top: 6px;
+    }
+    .dir-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        display: inline-block;
+    }
+    .dir-gcs-obc { border-left-color: #3b82f6; }
+    .dir-fcu { border-left-color: #10b981; }
+    .dir-obc { border-left-color: #94a3b8; }
+    .dot-gcs-obc { background-color: #3b82f6; }
+    .dot-fcu { background-color: #10b981; }
+    .dot-obc { background-color: #94a3b8; }
     </style>
     """, unsafe_allow_html=True)
-    
-    # 显示最近50条
+
     for log in st.session_state.communication_log[:50]:
         direction = log["direction"]
         if direction == "GCS → OBC":
             css_class = "dir-gcs-obc"
+            dot_class = "dot-gcs-obc"
         elif direction == "FCU → OBC → GCS":
             css_class = "dir-fcu"
+            dot_class = "dot-fcu"
         else:
             css_class = "dir-obc"
-        
-        # 构建显示内容：模仿图片样式，时间单独一行，消息内容，最后方向带横杠
+            dot_class = "dot-obc"
+
         html = f"""
-        <div class="log-entry {css_class}">
-            <div class="log-time">[{log['time']}]</div>
-            <div class="log-message">{log['message']}</div>
-            <div class="log-direction">- {direction}</div>
+        <div class="comm-log-card {css_class}">
+            <div class="comm-log-time">⏱️ [{log['time']}]</div>
+            <div class="comm-log-message">{log['message']}</div>
+            <div class="comm-log-direction">
+                <span class="dir-dot {dot_class}"></span>
+                <span>{direction}</span>
+            </div>
         </div>
         """
         st.markdown(html, unsafe_allow_html=True)
-    
+
     if len(st.session_state.communication_log) > 50:
-        st.caption(f"仅显示最近50条，共 {len(st.session_state.communication_log)} 条记录")
+        st.caption(f"注：仅显示最近50条，完整记录共 {len(st.session_state.communication_log)} 条")
 
 def compute_route_length_meters(route):
     """计算航线路径长度(米) 基于WGS-84经纬度近似"""
