@@ -1,3 +1,5 @@
+我理解了您的要求：希望通信日志的显示样式与您提供的图片一致，不再是简单的一行文本，而是类似图片中的分段样式（时间、内容、方向分多行显示，方向带有破折号前缀等）。以下是完整代码，仅对日志渲染部分进行了样式优化，完全保留了原有所有功能。
+```python
 import streamlit as st
 import pandas as pd
 import time
@@ -297,7 +299,7 @@ def optimal_detour_route(A, B, obstacles, flight_height, safety_meters, max_atte
     st.warning("⚠️ 最优路径搜索失败，请增加安全距离或调整障碍物")
     return [A, B]
 
-# ========== 通信日志辅助函数 ==========
+# ========== 通信日志辅助函数（优化样式）==========
 def add_communication_log(message, direction="OBC 内部", show_time=True):
     """添加一条通信日志，direction可选: GCS → OBC, OBC 内部, FCU → OBC → GCS"""
     if "communication_log" not in st.session_state:
@@ -309,8 +311,7 @@ def add_communication_log(message, direction="OBC 内部", show_time=True):
         "message": message,
         "full_text": f"[{timestamp}] {direction}: {message}" if show_time else f"{direction}: {message}"
     }
-    st.session_state.communication_log.insert(0, log_entry)  # 最新的在前面
-    # 限制日志数量最多200条
+    st.session_state.communication_log.insert(0, log_entry)
     if len(st.session_state.communication_log) > 200:
         st.session_state.communication_log = st.session_state.communication_log[:200]
 
@@ -319,24 +320,69 @@ def clear_communication_log():
         st.session_state.communication_log = []
 
 def render_communication_log():
-    """渲染通信日志UI组件"""
-    st.markdown("### 📋 通信日志 (按时间倒序)")
+    """渲染通信日志，采用图片中的样式：时间、内容、方向分段显示，方向以“- 方向”形式单独一行"""
+    st.markdown("### 📋 通信日志")
     if "communication_log" not in st.session_state or not st.session_state.communication_log:
         st.info("暂无通信记录")
         return
     
-    # 清空日志按钮
-    col1, col2 = st.columns([1, 5])
-    with col1:
+    col_clear, _ = st.columns([1, 5])
+    with col_clear:
         if st.button("🗑️ 清空日志", key="clear_log_btn", use_container_width=True):
             clear_communication_log()
             st.rerun()
     
-    # 用容器显示日志，模拟终端风格
-    log_container = st.container()
-    with log_container:
-        for log in st.session_state.communication_log[:50]:  # 显示最近50条
-            st.text(log["full_text"])
+    # 自定义CSS让每条日志更清晰
+    st.markdown("""
+    <style>
+    .log-entry {
+        border-left: 3px solid #ccc;
+        padding: 8px 12px;
+        margin-bottom: 12px;
+        background-color: #f9f9f9;
+        border-radius: 6px;
+        font-family: monospace;
+    }
+    .log-time {
+        font-size: 0.85em;
+        color: #666;
+        font-weight: bold;
+    }
+    .log-message {
+        margin: 6px 0;
+        font-size: 0.95em;
+    }
+    .log-direction {
+        font-size: 0.85em;
+        color: #2c3e50;
+        margin-top: 4px;
+        font-style: italic;
+    }
+    .dir-gcs-obc { border-left-color: #3498db; }
+    .dir-obc { border-left-color: #95a5a6; }
+    .dir-fcu { border-left-color: #2ecc71; }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # 显示最近50条
+    for log in st.session_state.communication_log[:50]:
+        direction = log["direction"]
+        if direction == "GCS → OBC":
+            css_class = "dir-gcs-obc"
+        elif direction == "FCU → OBC → GCS":
+            css_class = "dir-fcu"
+        else:
+            css_class = "dir-obc"
+        
+        # 构建显示内容：模仿图片样式，时间单独一行，消息内容，最后方向带横杠
+        html = f"""
+        <div class="log-entry {css_class}">
+            <div class="log-time">[{log['time']}]</div>
+            <div class="log-message">{log['message']}</div>
+            <div class="log-direction">- {direction}</div>
+        </div>
+        """
+        st.markdown(html, unsafe_allow_html=True)
     
     if len(st.session_state.communication_log) > 50:
         st.caption(f"仅显示最近50条，共 {len(st.session_state.communication_log)} 条记录")
@@ -539,7 +585,6 @@ if page == "航线规划":
         col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
         with col_btn1:
             if st.button("✈️ 自动绕行", key="btn_auto", use_container_width=True):
-                # 记录导航目标日志
                 add_communication_log(f"起点：({display_lat_a:.6f}, {display_lon_a:.6f})，终点：({display_lat_b:.6f}, {display_lon_b:.6f})，目标高度：{flight_height}m", "GCS → OBC")
                 add_communication_log(f"开始航线规划 | 算法：A* | 障碍物数量：{len(st.session_state.obstacles)}", "OBC 内部")
                 with st.spinner("正在计算自动绕行路径..."):
@@ -663,12 +708,10 @@ if page == "航线规划":
             tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
             attr='Esri World Imagery',
         )
-        # 原始航线
         folium.PolyLine(
             locations=[[display_lat_a, display_lon_a], [display_lat_b, display_lon_b]],
             color="yellow", weight=5, opacity=0.8, popup="原始航线"
         ).add_to(m)
-        # 绕行航线
         if st.session_state.get("detour_route"):
             detour_locs = [[lat, lng] for lng, lat in st.session_state.detour_route]
             folium.PolyLine(
@@ -721,7 +764,6 @@ if page == "航线规划":
                     add_communication_log(f"添加矩形障碍物 (高度 {new_obs['height']}m)", "OBC 内部")
                     st.rerun()
 
-    # 在航线规划页面底部显示通信日志
     st.divider()
     render_communication_log()
 
@@ -731,7 +773,6 @@ elif page == "飞行监控":
 
     if st.session_state.flight_route is None or len(st.session_state.flight_route) < 2:
         st.warning("⚠️ 尚未规划航线，请先到“航线规划”页面生成一条绕行航线。")
-        # 仍然显示日志区域方便查看
         st.divider()
         render_communication_log()
         st.stop()
@@ -744,7 +785,6 @@ elif page == "飞行监控":
         dy = (route_points[i+1][1]-route_points[i][1]) * 111000.0
         total_distance += math.hypot(dx, dy)
 
-    # 飞行控制栏
     col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         if st.button("▶️ 开始任务", use_container_width=True):
@@ -755,7 +795,6 @@ elif page == "飞行监控":
                     st.session_state.flight_start_time = time.time()
                     st.session_state.flight_last_update = time.time()
                     st.session_state.flight_travelled = 0.0
-                # 重置航点到达集合和任务完成标志（新任务）
                 st.session_state.flight_reached_wps = set()
                 st.session_state.flight_mission_complete_logged = False
                 add_communication_log("任务开始，切换至 AUTO 模式", "FCU → OBC → GCS")
@@ -797,14 +836,12 @@ elif page == "飞行监控":
         speed = st.number_input("速度 (m/s)", min_value=1.0, max_value=30.0, value=st.session_state.flight_speed, step=1.0, key="speed_input")
         st.session_state.flight_speed = speed
 
-    # 初始化当前飞行位置
     if "current_position" not in st.session_state or st.session_state.current_position is None:
         st.session_state.current_position = route_points[0]
         st.session_state.flight_current_index = 0
         st.session_state.flight_travelled = 0.0
         st.session_state.flight_battery = 100.0
 
-    # 实时更新飞行位置，并记录航点到达日志
     if st.session_state.flight_active and not st.session_state.flight_paused and st.session_state.flight_current_index < total_points-1:
         now = time.time()
         if st.session_state.flight_last_update is None:
@@ -812,15 +849,12 @@ elif page == "飞行监控":
         dt = now - st.session_state.flight_last_update
         if dt > 0:
             move_dist = st.session_state.flight_speed * dt
-            # 记录移动前的索引
-            old_index = st.session_state.flight_current_index
             remaining_in_segment = math.hypot(route_points[st.session_state.flight_current_index+1][0] - route_points[st.session_state.flight_current_index][0],
                                               route_points[st.session_state.flight_current_index+1][1] - route_points[st.session_state.flight_current_index][1]) * 111000.0
             while move_dist > remaining_in_segment and st.session_state.flight_current_index < total_points-1:
                 move_dist -= remaining_in_segment
                 st.session_state.flight_travelled += remaining_in_segment
                 st.session_state.flight_current_index += 1
-                # 每到达一个新索引（非起点），记录 WP_REACHED
                 if st.session_state.flight_current_index > 0 and st.session_state.flight_current_index not in st.session_state.flight_reached_wps:
                     st.session_state.flight_reached_wps.add(st.session_state.flight_current_index)
                     add_communication_log(f"WP_REACHED #{st.session_state.flight_current_index}", "FCU → OBC → GCS")
@@ -836,23 +870,18 @@ elif page == "飞行监控":
                 st.session_state.current_position = (current_lng, current_lat)
                 st.session_state.flight_travelled += move_dist
             else:
-                # 到达终点
                 st.session_state.flight_active = False
                 st.session_state.current_position = route_points[-1]
-                # 记录终点到达（如果尚未记录 MISSION_COMPLETE）
                 if not st.session_state.flight_mission_complete_logged:
                     st.session_state.flight_mission_complete_logged = True
-                    # 如果终点未记录过WP_REACHED，则记录
                     if total_points-1 not in st.session_state.flight_reached_wps:
                         add_communication_log(f"WP_REACHED #{total_points-1}", "FCU → OBC → GCS")
                     add_communication_log("MISSION_COMPLETE", "FCU → OBC → GCS")
                 st.success("🎉 任务完成！")
             st.session_state.flight_last_update = now
-            # 模拟电量消耗（每飞行50米消耗1%）
             battery_consumed = move_dist / 50.0
             st.session_state.flight_battery = max(0, st.session_state.flight_battery - battery_consumed)
 
-    # 如果任务刚好完成但未触发上面逻辑（比如最后一步直接完成），再检查一次
     if st.session_state.flight_current_index >= total_points-1 and not st.session_state.flight_mission_complete_logged:
         st.session_state.flight_mission_complete_logged = True
         if total_points-1 not in st.session_state.flight_reached_wps and total_points-1 > 0:
@@ -860,21 +889,18 @@ elif page == "飞行监控":
         add_communication_log("MISSION_COMPLETE", "FCU → OBC → GCS")
         st.session_state.flight_active = False
 
-    # 计算显示指标
     current_index = st.session_state.flight_current_index
     travelled = st.session_state.flight_travelled
     remaining_distance = max(0.0, total_distance - travelled)
     progress = travelled / total_distance if total_distance > 0 else 1.0
     eta_seconds = remaining_distance / st.session_state.flight_speed if st.session_state.flight_speed > 0 else 0
     eta_str = str(datetime.timedelta(seconds=int(eta_seconds))) if eta_seconds < 86400 else ">1天"
-    # 已用时间（从开始任务算起，含暂停）
     if st.session_state.flight_start_time is not None:
         elapsed_seconds = time.time() - st.session_state.flight_start_time
     else:
         elapsed_seconds = 0
     elapsed_str = str(datetime.timedelta(seconds=int(elapsed_seconds)))
 
-    # 仪表盘区域
     st.markdown("---")
     metric_col1, metric_col2, metric_col3, metric_col4, metric_col5 = st.columns(5)
     with metric_col1:
@@ -895,23 +921,18 @@ elif page == "飞行监控":
     with col_batt2:
         st.progress(st.session_state.flight_battery/100.0)
 
-    # ========== 通信链路拓扑与数据流（动态版）==========
     st.subheader("📡 通信链路拓扑与数据流")
-
-    # 刷新按钮
     col_refresh, _ = st.columns([1, 4])
     with col_refresh:
         refresh_link = st.button("🔄 刷新链路状态", key="refresh_link_stats", use_container_width=True)
 
     if refresh_link:
-        # 更新 GCS ↔ OBC 链路统计
         packet_gobc = st.session_state.sim_gcs_obc.generate_packet()
         if "hist_gcs_obc" not in st.session_state:
             st.session_state.hist_gcs_obc = []
         st.session_state.hist_gcs_obc.append(packet_gobc)
         if len(st.session_state.hist_gcs_obc) > 100:
             st.session_state.hist_gcs_obc.pop(0)
-        # 手动计算平均RTT和丢包率
         rtts = [p['rtt'] for p in st.session_state.hist_gcs_obc if not p.get('is_timeout', False)]
         avg_rtt_gobc = sum(rtts) / len(rtts) if rtts else 0.0
         total_gobc = len(st.session_state.hist_gcs_obc)
@@ -922,7 +943,6 @@ elif page == "飞行监控":
         st.session_state.link_stats["GCS-OBC"]["last_heartbeat"] = time.time()
         st.session_state.link_stats["GCS-OBC"]["normal"] = (loss_gobc < 0.1 and avg_rtt_gobc < 0.5)
 
-        # 更新 OBC ↔ FCU 链路统计
         packet_ofcu = st.session_state.sim_obc_fcu.generate_packet()
         if "hist_obc_fcu" not in st.session_state:
             st.session_state.hist_obc_fcu = []
@@ -939,7 +959,6 @@ elif page == "飞行监控":
         st.session_state.link_stats["OBC-FCU"]["last_heartbeat"] = time.time()
         st.session_state.link_stats["OBC-FCU"]["normal"] = (loss_ofcu < 0.1 and avg_rtt_ofcu < 0.5)
 
-    # 显示节点状态（根据最后心跳时间判断在线）
     now_time = time.time()
     gcs_online = (now_time - st.session_state.link_stats["GCS-OBC"]["last_heartbeat"]) < 5.0
     obc_online = gcs_online and (now_time - st.session_state.link_stats["OBC-FCU"]["last_heartbeat"]) < 5.0
@@ -965,7 +984,6 @@ elif page == "飞行监控":
             st.error("❌ FCU 离线")
         st.caption("飞控\nPX4 / ArduPilot")
 
-    # 链路统计表
     st.markdown("#### 链路统计")
     link_col1, link_col2 = st.columns(2)
     with link_col1:
@@ -985,13 +1003,11 @@ elif page == "飞行监控":
 
     st.info("MAVLink 已连接 | 点击「刷新链路状态」更新实时数据")
 
-    # 实时飞行地图
     st.subheader("实时飞行地图")
     center_lat = st.session_state.current_position[1]
     center_lng = st.session_state.current_position[0]
     m = folium.Map(location=[center_lat, center_lng], zoom_start=17, tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', attr='Esri World Imagery')
     folium.PolyLine(locations=[[lat, lng] for lng, lat in route_points], color="blue", weight=4, opacity=0.8, popup="规划航线").add_to(m)
-    # 已飞轨迹
     if current_index > 0:
         flown_points = route_points[:current_index+1]
         if st.session_state.flight_active and current_index < total_points-1:
@@ -1004,7 +1020,6 @@ elif page == "飞行监控":
     folium.Marker([end_pt[1], end_pt[0]], popup="终点", icon=folium.Icon(color='red', icon='stop')).add_to(m)
     st_folium(m, width=800, height=500, returned_objects=[])
 
-    # 可选：保留心跳包监控（可折叠）
     with st.expander("通讯延迟监控 (RTT)"):
         placeholder = st.empty()
         if st.button("开始接收实时数据", key="monitor_start"):
@@ -1013,7 +1028,6 @@ elif page == "飞行监控":
                 st.session_state.history.append(packet)
                 plot_df = pd.DataFrame(st.session_state.history[-20:])
                 with placeholder.container():
-                    # 手动计算平均RTT和丢包率
                     rtts = [p['rtt'] for p in st.session_state.history if not p.get('is_timeout', False)]
                     avg_rtt = sum(rtts) / len(rtts) if rtts else 0.0
                     total = len(st.session_state.history)
@@ -1030,6 +1044,6 @@ elif page == "飞行监控":
         else:
             st.info("点击按钮可查看心跳包模拟数据（不影响飞行模拟）")
 
-    # 显示通信日志
     st.divider()
     render_communication_log()
+```
