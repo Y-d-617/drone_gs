@@ -1,5 +1,3 @@
-我理解了您的要求：希望通信日志的显示样式与您提供的图片一致，不再是简单的一行文本，而是类似图片中的分段样式（时间、内容、方向分多行显示，方向带有破折号前缀等）。以下是完整代码，仅对日志渲染部分进行了样式优化，完全保留了原有所有功能。
-```python
 import streamlit as st
 import pandas as pd
 import time
@@ -1046,4 +1044,3 @@ elif page == "飞行监控":
 
     st.divider()
     render_communication_log()
-```
